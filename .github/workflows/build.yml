@@ -1,0 +1,722 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Write project files
+        run: |
+          cat > settings.gradle <<'VTN_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "VideoToNoteLite"
+          include ':app'
+          VTN_EOF
+          cat > build.gradle <<'VTN_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          VTN_EOF
+          cat > gradle.properties <<'VTN_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          VTN_EOF
+          mkdir -p app
+          cat > app/build.gradle <<'VTN_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.vtn.lite'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.vtn.lite"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          VTN_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'VTN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="视频笔记"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          VTN_EOF
+          mkdir -p app/src/main/java/com/vtn/lite
+          cat > app/src/main/java/com/vtn/lite/MainActivity.java <<'VTN_EOF'
+          package com.vtn.lite;
+
+          import android.app.Activity;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
+          import java.util.Iterator;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+              private static final String HOME = "file:///android_asset/index.html";
+              private String sharedText = "";
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                          String sch = req.getUrl().getScheme();
+                          if ("http".equals(sch) || "https".equals(sch) || "file".equals(sch)) return false;
+                          return true;
+                      }
+                  });
+                  web.setWebChromeClient(new WebChromeClient());
+                  web.addJavascriptInterface(new Bridge(), "Native");
+                  readShare(getIntent());
+                  web.loadUrl(HOME);
+              }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  readShare(i);
+                  web.loadUrl(HOME);
+              }
+
+              private void readShare(Intent i) {
+                  if (i != null && Intent.ACTION_SEND.equals(i.getAction())) {
+                      String t = i.getStringExtra(Intent.EXTRA_TEXT);
+                      if (t != null) sharedText = t;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  String u = web.getUrl();
+                  if (u != null && !u.startsWith("file:")) {
+                      CookieManager.getInstance().flush();
+                      web.loadUrl(HOME);
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              private static String readAll(InputStream in) throws Exception {
+                  if (in == null) return "";
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                  byte[] buf = new byte[8192];
+                  int n;
+                  while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                  in.close();
+                  return new String(bo.toByteArray(), StandardCharsets.UTF_8);
+              }
+
+              private JSONObject doHttp(String method, String url, String headersJson, String body) {
+                  JSONObject r = new JSONObject();
+                  try {
+                      HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setRequestMethod(method);
+                      c.setConnectTimeout(20000);
+                      c.setReadTimeout(300000);
+                      c.setInstanceFollowRedirects(true);
+                      if (headersJson != null && headersJson.length() > 0) {
+                          JSONObject h = new JSONObject(headersJson);
+                          Iterator<String> it = h.keys();
+                          while (it.hasNext()) {
+                              String k = it.next();
+                              c.setRequestProperty(k, h.getString(k));
+                          }
+                      }
+                      if (url.contains("bilibili.com")) {
+                          String ck = CookieManager.getInstance().getCookie(url);
+                          if (ck != null) c.setRequestProperty("Cookie", ck);
+                      }
+                      if (body != null && body.length() > 0) {
+                          c.setDoOutput(true);
+                          OutputStream o = c.getOutputStream();
+                          o.write(body.getBytes(StandardCharsets.UTF_8));
+                          o.close();
+                      }
+                      int code = c.getResponseCode();
+                      InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                      r.put("status", code);
+                      r.put("body", readAll(in));
+                      r.put("url", c.getURL().toString());
+                  } catch (Exception e) {
+                      try { r.put("error", e.toString()); } catch (Exception ignored) { }
+                  }
+                  return r;
+              }
+
+              public class Bridge {
+                  @JavascriptInterface
+                  public void request(final String id, final String method, final String url,
+                                      final String headersJson, final String body) {
+                      new Thread(() -> {
+                          JSONObject r = doHttp(method, url, headersJson, body);
+                          final String js = "window.__nativeCb(" + JSONObject.quote(id) + "," + JSONObject.quote(r.toString()) + ")";
+                          runOnUiThread(() -> web.evaluateJavascript(js, null));
+                      }).start();
+                  }
+
+                  @JavascriptInterface
+                  public String md5(String s) {
+                      try {
+                          MessageDigest md = MessageDigest.getInstance("MD5");
+                          byte[] d = md.digest(s.getBytes(StandardCharsets.UTF_8));
+                          StringBuilder sb = new StringBuilder();
+                          for (byte x : d) sb.append(String.format("%02x", x & 0xff));
+                          return sb.toString();
+                      } catch (Exception e) {
+                          return "";
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public boolean hasLogin() {
+                      String ck = CookieManager.getInstance().getCookie("https://www.bilibili.com");
+                      return ck != null && ck.contains("SESSDATA");
+                  }
+
+                  @JavascriptInterface
+                  public void openLogin() {
+                      runOnUiThread(() -> web.loadUrl("https://passport.bilibili.com/login"));
+                  }
+
+                  @JavascriptInterface
+                  public void logout() {
+                      runOnUiThread(() -> {
+                          CookieManager.getInstance().removeAllCookies(null);
+                          CookieManager.getInstance().flush();
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public String takeShared() {
+                      String t = sharedText;
+                      sharedText = "";
+                      return t;
+                  }
+
+                  @JavascriptInterface
+                  public void copy(String text) {
+                      runOnUiThread(() -> {
+                          ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                          cb.setPrimaryClip(ClipData.newPlainText("note", text));
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void share(String title, String text) {
+                      runOnUiThread(() -> {
+                          Intent i = new Intent(Intent.ACTION_SEND);
+                          i.setType("text/plain");
+                          i.putExtra(Intent.EXTRA_SUBJECT, title);
+                          i.putExtra(Intent.EXTRA_TEXT, text);
+                          startActivity(Intent.createChooser(i, "分享笔记"));
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void openUrl(String url) {
+                      runOnUiThread(() -> {
+                          try {
+                              startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                          } catch (Exception ignored) { }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public String saveFile(String name, String text) {
+                      try {
+                          byte[] data = text.getBytes(StandardCharsets.UTF_8);
+                          if (Build.VERSION.SDK_INT >= 29) {
+                              ContentValues v = new ContentValues();
+                              v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                              v.put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream");
+                              v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/VideoToNote");
+                              Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                              OutputStream o = getContentResolver().openOutputStream(u);
+                              o.write(data);
+                              o.close();
+                              return "已保存到：下载/VideoToNote/" + name;
+                          } else {
+                              File f = new File(getExternalFilesDir(null), name);
+                              FileOutputStream o = new FileOutputStream(f);
+                              o.write(data);
+                              o.close();
+                              return "已保存到：" + f.getAbsolutePath();
+                          }
+                      } catch (Exception e) {
+                          return "保存失败：" + e;
+                      }
+                  }
+              }
+          }
+          VTN_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/index.html <<'VTN_EOF'
+          <!DOCTYPE html>
+          <html lang="zh-CN">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>视频笔记</title>
+          <style>
+          :root{--bg:#f5f6f8;--card:#fff;--fg:#1f2328;--mute:#6b7280;--pri:#2563eb;--bd:#e5e7eb;--err:#dc2626;--ok:#16a34a}
+          @media (prefers-color-scheme: dark){:root{--bg:#111318;--card:#1b1e25;--fg:#e6e6e6;--mute:#9aa0a6;--bd:#2c313a}}
+          *{box-sizing:border-box}
+          body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px}
+          .wrap{max-width:980px;margin:0 auto;padding:16px}
+          h1{font-size:22px;margin:4px 0 14px}
+          .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px}
+          .card h2{font-size:17px;margin:0 0 10px}
+          label{display:block;font-size:14px;color:var(--mute);margin:8px 0 4px}
+          input,textarea,select{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font-size:16px}
+          textarea{min-height:70px;resize:vertical}
+          button{padding:10px 16px;border:0;border-radius:8px;background:var(--pri);color:#fff;font-size:16px;margin:6px 6px 0 0}
+          button.sec{background:transparent;color:var(--pri);border:1px solid var(--pri)}
+          button:disabled{opacity:.5}
+          .row{display:flex;gap:10px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
+          .mute{color:var(--mute);font-size:14px}
+          #log{white-space:pre-wrap;font-size:14px;color:var(--mute);max-height:160px;overflow:auto}
+          #log .e{color:var(--err)}#log .o{color:var(--ok)}
+          #preview{line-height:1.7;overflow-wrap:anywhere}
+          #preview h1{font-size:22px}#preview h2{font-size:19px;border-bottom:1px solid var(--bd);padding-bottom:4px}#preview h3{font-size:17px}
+          #preview code{background:var(--bg);padding:1px 4px;border-radius:4px}
+          #preview a.ts{color:var(--pri);text-decoration:none;font-family:monospace}
+          #source{min-height:400px;font-family:monospace;font-size:14px}
+          .hist{padding:8px 0;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;gap:8px;align-items:center}
+          .hist span{flex:1}
+          details summary{cursor:pointer;font-weight:600}
+          </style>
+          </head>
+          <body>
+          <div class="wrap">
+          <h1>视频笔记 · 精简版</h1>
+
+          <div class="card">
+            <details id="setBox">
+              <summary>大模型设置（首次使用请先填写）</summary>
+              <label>接口地址（OpenAI 兼容）</label>
+              <input id="base" placeholder="https://api.deepseek.com">
+              <div class="row">
+                <div><label>模型名</label><input id="model" placeholder="deepseek-flash"></div>
+                <div><label>API Key</label><input id="key" type="password" placeholder="sk-..."></div>
+              </div>
+              <button id="saveSet">保存设置</button><button class="sec" id="testSet">测试连接</button>
+              <p class="mute">Key 只保存在本机，不会上传到别处。</p>
+            </details>
+          </div>
+
+          <div class="card">
+            <h2>B站登录</h2>
+            <div id="loginState" class="mute">检测中…</div>
+            <button id="loginBtn">登录B站</button><button class="sec" id="logoutBtn">退出登录</button>
+            <p class="mute">B站的 AI 字幕通常要登录才能获取。登录成功后，按平板的“返回”键回到本应用。登录状态会一直保存，不用每次重填。</p>
+          </div>
+
+          <div class="card">
+            <h2>生成笔记</h2>
+            <label>粘贴B站链接或分享文字（支持 b23.tv 短链、BV号）</label>
+            <textarea id="input" placeholder="例如：https://www.bilibili.com/video/BV1xx411c7mD?p=2"></textarea>
+            <div class="row">
+              <div><label>分P（留空=自动识别）</label><input id="pnum" type="number" min="1" placeholder="自动"></div>
+              <div><label>笔记风格</label>
+                <select id="style">
+                  <option value="study">学习笔记（知识点+例子）</option>
+                  <option value="brief">简要摘要</option>
+                  <option value="detail">详细逐段</option>
+                </select></div>
+            </div>
+            <button id="goBtn">开始生成</button><button class="sec" id="subOnly">只提取字幕</button>
+            <div id="log"></div>
+          </div>
+
+          <div class="card" id="resCard" style="display:none">
+            <h2 id="resTitle">结果</h2>
+            <button class="sec" id="tPrev">预览</button><button class="sec" id="tSrc">源码</button>
+            <button id="bSave">保存 .md</button><button id="bSrt">保存字幕 .srt</button>
+            <button class="sec" id="bCopy">复制</button><button class="sec" id="bShare">分享</button>
+            <div id="preview" style="margin-top:12px"></div>
+            <textarea id="source" style="display:none;margin-top:12px"></textarea>
+          </div>
+
+          <div class="card">
+            <h2>历史记录</h2>
+            <div id="hist" class="mute">暂无</div>
+          </div>
+          </div>
+
+          <script>
+          "use strict";
+          const $ = id => document.getElementById(id);
+          const HAS_NATIVE = typeof window.Native !== "undefined";
+
+          const cbs = {}; let seq = 0;
+          window.__nativeCb = (id, s) => { const f = cbs[id]; delete cbs[id]; if (f) f(JSON.parse(s)); };
+          function http(method, url, headers, body) {
+            return new Promise((res, rej) => {
+              if (!HAS_NATIVE) { rej(new Error("请在安卓应用里运行")); return; }
+              const id = "r" + (++seq);
+              cbs[id] = r => r.error ? rej(new Error("网络错误：" + r.error)) : res(r);
+              Native.request(id, method, url, JSON.stringify(headers || {}), body || "");
+            });
+          }
+
+          function log(msg, cls) { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = msg; $("log").appendChild(d); $("log").scrollTop = 1e9; }
+
+          const S = { base: "https://api.deepseek.com", model: "deepseek-flash", key: "" };
+          try { Object.assign(S, JSON.parse(localStorage.getItem("vtn_set") || "{}")); } catch (e) {}
+          $("base").value = S.base; $("model").value = S.model; $("key").value = S.key;
+          if (!S.key) $("setBox").open = true;
+          $("saveSet").onclick = () => {
+            S.base = $("base").value.trim() || "https://api.deepseek.com";
+            S.model = $("model").value.trim() || "deepseek-flash";
+            S.key = $("key").value.trim();
+            localStorage.setItem("vtn_set", JSON.stringify(S));
+          };
+          $("testSet").onclick = async () => {
+            $("saveSet").onclick();
+            try { const t = await chat([{ role: "user", content: "只回复四个字：连接成功" }]); alert("模型回复：" + t); }
+            catch (e) { alert(e.message); }
+          };
+
+          function refreshLogin() {
+            if (!HAS_NATIVE) { $("loginState").textContent = "（浏览器预览模式，无法登录）"; return; }
+            const ok = Native.hasLogin();
+            $("loginState").textContent = ok ? "已登录，可以获取 AI 字幕" : "未登录";
+            $("loginState").style.color = ok ? "var(--ok)" : "var(--mute)";
+          }
+          $("loginBtn").onclick = () => HAS_NATIVE && Native.openLogin();
+          $("logoutBtn").onclick = () => { if (HAS_NATIVE) { Native.logout(); setTimeout(refreshLogin, 500); } };
+          refreshLogin();
+
+          const BH = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/"
+          };
+          async function bget(url) {
+            const r = await http("GET", url, BH);
+            let j; try { j = JSON.parse(r.body); } catch (e) { throw new Error("B站返回了看不懂的内容（状态码 " + r.status + "）"); }
+            if (j.code !== 0) throw new Error("B站接口报错：" + j.message + "（code " + j.code + "）");
+            return j.data;
+          }
+          const MIX = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52];
+          let mixinKey = null;
+          async function getMixin() {
+            if (mixinKey) return mixinKey;
+            const r = await http("GET", "https://api.bilibili.com/x/web-interface/nav", BH);
+            const d = JSON.parse(r.body).data.wbi_img;
+            const stem = u => u.slice(u.lastIndexOf("/") + 1).split(".")[0];
+            const raw = stem(d.img_url) + stem(d.sub_url);
+            mixinKey = MIX.map(i => raw[i]).join("").slice(0, 32);
+            return mixinKey;
+          }
+          async function signed(params) {
+            const key = await getMixin();
+            params.wts = Math.floor(Date.now() / 1000);
+            const q = Object.keys(params).sort().map(k =>
+              encodeURIComponent(k) + "=" + encodeURIComponent(String(params[k]).replace(/[!'()*]/g, ""))).join("&");
+            return q + "&w_rid=" + Native.md5(q + key);
+          }
+
+          async function parseInput(text) {
+            let url = (text.match(/https?:\/\/[^\s\u3000\u4e00-\u9fa5]+/) || [""])[0];
+            if (/b23\.tv/.test(url)) {
+              log("正在解析短链接…");
+              const r = await http("GET", url, BH);
+              url = r.url;
+            }
+            const src = url || text;
+            const bv = (src.match(/BV[0-9A-Za-z]{10}/) || [null])[0];
+            const av = (src.match(/av(\d+)/i) || [null, null])[1];
+            const p = parseInt((src.match(/[?&]p=(\d+)/) || [0, 0])[1]) || 0;
+            if (!bv && !av) throw new Error("没有识别到B站视频链接或BV号");
+            return { bv, av, p };
+          }
+
+          async function fetchSubs(info) {
+            log("正在读取视频信息…");
+            const view = await bget("https://api.bilibili.com/x/web-interface/view?" + (info.bv ? "bvid=" + info.bv : "aid=" + info.av));
+            const pages = view.pages || [];
+            const pIdx = (parseInt($("pnum").value) || info.p || 1);
+            const page = pages[pIdx - 1] || pages[0];
+            let title = view.title;
+            if (pages.length > 1) title += " P" + page.page + " " + page.part;
+            log("视频：" + title);
+            log("正在查找字幕…");
+            const q = await signed({ bvid: view.bvid, cid: page.cid });
+            const player = await bget("https://api.bilibili.com/x/player/wbi/v2?" + q);
+            const list = (player.subtitle && player.subtitle.subtitles) || [];
+            if (!list.length) {
+              if (!HAS_NATIVE || !Native.hasLogin()) throw new Error("没有拿到字幕。B站的 AI 字幕一般要登录后才给，请先点“登录B站”再试。");
+              throw new Error("这个视频没有字幕（也没有 AI 字幕）。精简版不能在本机转写语音，请换一个视频。");
+            }
+            const pick = list.find(s => /^zh/.test(s.lan)) || list.find(s => /^ai-zh/.test(s.lan)) || list[0];
+            let surl = pick.subtitle_url; if (surl.startsWith("//")) surl = "https:" + surl;
+            log("使用字幕：" + (pick.lan_doc || pick.lan));
+            const r = await http("GET", surl, BH);
+            const body = JSON.parse(r.body).body || [];
+            const segs = body.map(x => ({ from: x.from, to: x.to, text: x.content }));
+            if (!segs.length) throw new Error("字幕内容为空");
+            return { title, segs, bvid: view.bvid, p: page.page };
+          }
+
+          const pad = n => String(n).padStart(2, "0");
+          function fmt(t) { t = Math.floor(t); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60; return (h ? h + ":" + pad(m) : pad(m)) + ":" + pad(s); }
+          function srtTime(t) { const ms = Math.round(t * 1000); const h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000), s = Math.floor(ms % 60000 / 1000); return pad(h) + ":" + pad(m) + ":" + pad(s) + "," + String(ms % 1000).padStart(3, "0"); }
+          function toSrt(segs) { return segs.map((x, i) => (i + 1) + "\n" + srtTime(x.from) + " --> " + srtTime(x.to) + "\n" + x.text + "\n").join("\n"); }
+          function toLines(segs) {
+            const out = []; let cur = null;
+            for (const x of segs) {
+              if (!cur || x.from - cur.from > 20) { cur = { from: x.from, text: x.text }; out.push(cur); }
+              else cur.text += "，" + x.text;
+            }
+            return out.map(c => "[" + fmt(c.from) + "] " + c.text);
+          }
+
+          async function chat(messages) {
+            if (!S.key) throw new Error("还没有填写 API Key，请先展开“大模型设置”");
+            const base = S.base.replace(/\/+$/, "");
+            const r = await http("POST", base + "/chat/completions",
+              { "Content-Type": "application/json", "Authorization": "Bearer " + S.key },
+              JSON.stringify({ model: S.model, messages, temperature: 0.3 }));
+            let j = null; try { j = JSON.parse(r.body); } catch (e) {}
+            if (r.status !== 200 || !j) {
+              const m = (j && j.error && j.error.message) || r.body.slice(0, 200);
+              const tip = { 401: "API Key 不对或已失效", 402: "账户余额不足，需要充值", 429: "请求太频繁或额度用完，稍后再试" }[r.status] || "大模型请求失败";
+              throw new Error(tip + "（状态码 " + r.status + "）：" + m);
+            }
+            return j.choices[0].message.content;
+          }
+          const STYLE = {
+            study: "写成学习笔记：按内容分成若干小节，每节有小标题、要点列表，重要概念加粗，有例子或公式要保留，最后给“知识点总结”。",
+            brief: "写成简要摘要：先用3-5句话概括全片，再列出最多8条关键要点。",
+            detail: "写成详细逐段笔记：按时间顺序逐段整理，尽量保留讲解中的细节、数据和例子。"
+          };
+          function sysPrompt() {
+            return "你是专业的视频笔记助手。用户会给你带时间戳的视频字幕（格式 [分:秒] 文字）。请用简体中文输出 Markdown 笔记。" +
+              STYLE[$("style").value] +
+              "要求：1）每个小节标题或要点后面标注对应的开始时间，格式严格为 [mm:ss] 或 [h:mm:ss]；2）只根据字幕内容整理，不要编造；3）字幕是自动识别的，可能有错别字，请按上下文修正；4）不要输出多余的开场白。";
+          }
+          async function makeNotes(title, segs) {
+            const lines = toLines(segs);
+            const chunks = []; let buf = "";
+            for (const l of lines) { if (buf.length + l.length > 60000) { chunks.push(buf); buf = ""; } buf += l + "\n"; }
+            if (buf) chunks.push(buf);
+            if (chunks.length === 1) {
+              log("正在请大模型写笔记（可能需要半分钟到两分钟）…");
+              return await chat([{ role: "system", content: sysPrompt() }, { role: "user", content: "视频标题：" + title + "\n\n字幕：\n" + chunks[0] }]);
+            }
+            const parts = [];
+            for (let i = 0; i < chunks.length; i++) {
+              log("视频较长，分段处理：第 " + (i + 1) + "/" + chunks.length + " 段…");
+              parts.push(await chat([{ role: "system", content: sysPrompt() + "这是长视频的其中一段，只整理这一段，不要写全片总结，用二级标题 ## 开头。" },
+                { role: "user", content: "视频标题：" + title + "\n第 " + (i + 1) + "/" + chunks.length + " 段字幕：\n" + chunks[i] }]));
+            }
+            log("正在生成全片概要…");
+            const joined = parts.join("\n\n");
+            const sum = await chat([{ role: "user", content: "下面是一个视频的分段笔记，请用简体中文写一个“## 全片概要”小节（3-6句话加最多8条要点），只输出这个小节：\n\n" + joined.slice(0, 60000) }]);
+            return "# " + title + "\n\n" + sum + "\n\n" + joined;
+          }
+
+          let current = null;
+          function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+          function tsToSec(t) { return t.split(":").map(Number).reduce((a, b) => a * 60 + b, 0); }
+          function inline(s) {
+            s = esc(s);
+            s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+            s = s.replace(/\[((?:\d+:)?\d{1,2}:\d{2})\]/g, (m, t) => '<a class="ts" href="#" data-t="' + tsToSec(t) + '">[' + t + "]</a>");
+            return s;
+          }
+          function render(md) {
+            const out = []; let list = null;
+            const close = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+            for (const raw of md.split("\n")) {
+              const l = raw.replace(/\s+$/, "");
+              let m;
+              if ((m = l.match(/^(#{1,6})\s+(.*)/))) { close(); out.push("<h" + m[1].length + ">" + inline(m[2]) + "</h" + m[1].length + ">"); }
+              else if ((m = l.match(/^\s*[-*+]\s+(.*)/))) { if (list !== "ul") { close(); out.push("<ul>"); list = "ul"; } out.push("<li>" + inline(m[1]) + "</li>"); }
+              else if ((m = l.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== "ol") { close(); out.push("<ol>"); list = "ol"; } out.push("<li>" + inline(m[1]) + "</li>"); }
+              else if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) { close(); out.push("<hr>"); }
+              else if (!l.trim()) { close(); }
+              else { close(); out.push("<p>" + inline(l) + "</p>"); }
+            }
+            close();
+            return out.join("\n");
+          }
+          $("preview").addEventListener("click", e => {
+            const a = e.target.closest("a.ts"); if (!a) return; e.preventDefault();
+            if (current && current.bvid && HAS_NATIVE) Native.openUrl("https://www.bilibili.com/video/" + current.bvid + "?p=" + current.p + "&t=" + a.dataset.t);
+          });
+          function show(item) {
+            current = item;
+            $("resCard").style.display = "block";
+            $("resTitle").textContent = item.title;
+            $("source").value = item.md;
+            $("preview").innerHTML = render(item.md);
+            $("preview").style.display = "block"; $("source").style.display = "none";
+            $("resCard").scrollIntoView({ behavior: "smooth" });
+          }
+          $("tPrev").onclick = () => { current.md = $("source").value; $("preview").innerHTML = render(current.md); $("preview").style.display = "block"; $("source").style.display = "none"; };
+          $("tSrc").onclick = () => { $("preview").style.display = "none"; $("source").style.display = "block"; };
+          const safeName = s => s.replace(/[\\/:*?"<>|\n\r]/g, "_").slice(0, 80);
+          $("bSave").onclick = () => { current.md = $("source").value; alert(Native.saveFile(safeName(current.title) + ".md", current.md)); };
+          $("bSrt").onclick = () => { if (!current.srt) { alert("这条记录没有字幕数据"); return; } alert(Native.saveFile(safeName(current.title) + ".srt", current.srt)); };
+          $("bCopy").onclick = () => { Native.copy($("source").value); alert("已复制"); };
+          $("bShare").onclick = () => Native.share(current.title, $("source").value);
+
+          function loadHist() { try { return JSON.parse(localStorage.getItem("vtn_hist") || "[]"); } catch (e) { return []; } }
+          function saveHist(item) {
+            let h = loadHist().filter(x => !(x.bvid === item.bvid && x.p === item.p && x.kind === item.kind));
+            h.unshift(item); h = h.slice(0, 15);
+            for (;;) { try { localStorage.setItem("vtn_hist", JSON.stringify(h)); break; } catch (e) { if (!h.length) break; h.pop(); } }
+            drawHist();
+          }
+          function drawHist() {
+            const h = loadHist(); const box = $("hist");
+            if (!h.length) { box.textContent = "暂无"; return; }
+            box.innerHTML = "";
+            h.forEach((it, i) => {
+              const d = document.createElement("div"); d.className = "hist";
+              const s = document.createElement("span"); s.textContent = (it.kind === "sub" ? "【字幕】" : "") + it.title + "  ·  " + new Date(it.time).toLocaleString();
+              const b = document.createElement("button"); b.className = "sec"; b.textContent = "打开"; b.onclick = () => show(it);
+              const x = document.createElement("button"); x.className = "sec"; x.textContent = "删除";
+              x.onclick = () => { const a = loadHist(); a.splice(i, 1); localStorage.setItem("vtn_hist", JSON.stringify(a)); drawHist(); };
+              d.append(s, b, x); box.appendChild(d);
+            });
+          }
+          drawHist();
+
+          async function run(subOnly) {
+            $("log").innerHTML = "";
+            $("goBtn").disabled = $("subOnly").disabled = true;
+            try {
+              const info = await parseInput($("input").value.trim());
+              const v = await fetchSubs(info);
+              log("字幕共 " + v.segs.length + " 条", "o");
+              const srt = toSrt(v.segs);
+              let md;
+              if (subOnly) md = "# " + v.title + "【字幕】\n\n" + toLines(v.segs).join("\n\n");
+              else {
+                md = await makeNotes(v.title, v.segs);
+                if (!/^#\s/.test(md.trim())) md = "# " + v.title + "\n\n" + md;
+                md += "\n\n---\n来源：https://www.bilibili.com/video/" + v.bvid + "?p=" + v.p + "\n";
+              }
+              const item = { title: v.title, bvid: v.bvid, p: v.p, md, srt, kind: subOnly ? "sub" : "note", time: Date.now() };
+              saveHist(item); show(item);
+              log("完成！", "o");
+            } catch (e) {
+              log("出错了：" + e.message, "e");
+            } finally {
+              $("goBtn").disabled = $("subOnly").disabled = false;
+            }
+          }
+          $("goBtn").onclick = () => run(false);
+          $("subOnly").onclick = () => run(true);
+
+          if (HAS_NATIVE) { const t = Native.takeShared(); if (t) $("input").value = t; }
+          </script>
+          </body>
+          </html>
+          VTN_EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk VideoToNote-Lite.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoToNote-Lite
+          path: VideoToNote-Lite.apk
+
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 视频笔记精简版 第${{ github.run_number }}版
+          files: VideoToNote-Lite.apk

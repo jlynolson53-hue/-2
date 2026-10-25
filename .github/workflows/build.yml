@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 6
-                  versionName "1.4.1"
+                  versionCode 7
+                  versionName "1.5"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -449,6 +449,42 @@ jobs:
           </adaptive-icon>
           VTN_EOF
           mkdir -p app/src/main/java/com/vtn/lite
+          mkdir -p app/src/main/java/android/print
+          cat > app/src/main/java/android/print/PdfPrint.java <<'VTN_EOF'
+          package android.print;
+
+          import android.os.CancellationSignal;
+          import android.os.ParcelFileDescriptor;
+          import java.io.File;
+
+          public class PdfPrint {
+              public interface Done { void ok(File f); void fail(String m); }
+              private final PrintAttributes attrs;
+              public PdfPrint(PrintAttributes a) { attrs = a; }
+              public void print(final PrintDocumentAdapter ad, final File out, final Done cb) {
+                  ad.onLayout(null, attrs, null, new PrintDocumentAdapter.LayoutResultCallback() {
+                      @Override
+                      public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
+                          try {
+                              final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(out,
+                                  ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE | ParcelFileDescriptor.MODE_READ_WRITE);
+                              ad.onWrite(new PageRange[]{PageRange.ALL_PAGES}, pfd, new CancellationSignal(), new PrintDocumentAdapter.WriteResultCallback() {
+                                  @Override
+                                  public void onWriteFinished(PageRange[] pages) {
+                                      try { pfd.close(); } catch (Exception ignored) { }
+                                      cb.ok(out);
+                                  }
+                                  @Override
+                                  public void onWriteFailed(CharSequence e) { cb.fail(String.valueOf(e)); }
+                              });
+                          } catch (Exception e) { cb.fail(e.toString()); }
+                      }
+                      @Override
+                      public void onLayoutFailed(CharSequence e) { cb.fail(String.valueOf(e)); }
+                  }, null);
+              }
+          }
+          VTN_EOF
           cat > app/src/main/java/com/vtn/lite/MainActivity.java <<'VTN_EOF'
           package com.vtn.lite;
 
@@ -495,6 +531,9 @@ jobs:
           import android.media.MediaMuxer;
           import android.util.Base64;
           import org.json.JSONArray;
+          import android.print.PdfPrint;
+          import android.print.PrintAttributes;
+          import android.print.PrintManager;
 
           public class MainActivity extends Activity {
               private WebView web;
@@ -767,6 +806,95 @@ jobs:
                           if (!f.exists()) return "";
                           return new String(readFile(f), StandardCharsets.UTF_8);
                       } catch (Exception e) { return ""; }
+                  }
+
+                  // ===== v1.5：导出 PDF =====
+                  private WebView pdfWeb;
+
+                  private String saveBytes(String name, byte[] data, String mime) throws Exception {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          ContentValues v = new ContentValues();
+                          v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                          v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                          v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/VideoToNote");
+                          Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                          OutputStream o = getContentResolver().openOutputStream(u);
+                          o.write(data); o.close();
+                          return "已保存到：下载/VideoToNote/" + name;
+                      } else {
+                          File f = new File(getExternalFilesDir(null), name);
+                          FileOutputStream o = new FileOutputStream(f);
+                          o.write(data); o.close();
+                          return "已保存到：" + f.getAbsolutePath();
+                      }
+                  }
+
+                  private void loadForPrint(final String html, final Runnable then) {
+                      pdfWeb = new WebView(MainActivity.this);
+                      WebSettings s = pdfWeb.getSettings();
+                      s.setJavaScriptEnabled(false);
+                      s.setAllowFileAccess(true);
+                      s.setAllowFileAccessFromFileURLs(true);
+                      s.setAllowUniversalAccessFromFileURLs(true);
+                      pdfWeb.setWebViewClient(new WebViewClient() {
+                          boolean done = false;
+                          @Override
+                          public void onPageFinished(WebView v, String u) {
+                              if (done) return;
+                              done = true;
+                              v.postDelayed(then, 1500);
+                          }
+                      });
+                      pdfWeb.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null);
+                  }
+
+                  @JavascriptInterface
+                  public void makePdf(final String id, final String html, final String name) {
+                      runOnUiThread(() -> {
+                          try {
+                              loadForPrint(html, () -> {
+                                  try {
+                                      PrintAttributes a = new PrintAttributes.Builder()
+                                          .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                                          .setResolution(new PrintAttributes.Resolution("pdf", "pdf", 600, 600))
+                                          .setMinMargins(new PrintAttributes.Margins(500, 500, 500, 500))
+                                          .build();
+                                      final File out = new File(getCacheDir(), "note_export.pdf");
+                                      new PdfPrint(a).print(pdfWeb.createPrintDocumentAdapter(name), out, new PdfPrint.Done() {
+                                          public void ok(final File f) {
+                                              new Thread(() -> {
+                                                  JSONObject r = new JSONObject();
+                                                  try { r.put("msg", saveBytes(name, readFile(f), "application/pdf")); }
+                                                  catch (Exception e) { try { r.put("error", e.toString()); } catch (Exception ig) { } }
+                                                  reply(id, r);
+                                              }).start();
+                                          }
+                                          public void fail(String m) {
+                                              JSONObject r = new JSONObject();
+                                              try { r.put("error", "生成 PDF 失败：" + m); } catch (Exception ig) { }
+                                              reply(id, r);
+                                          }
+                                      });
+                                  } catch (Exception e) {
+                                      JSONObject r = new JSONObject();
+                                      try { r.put("error", e.toString()); } catch (Exception ig) { }
+                                      reply(id, r);
+                                  }
+                              });
+                          } catch (Exception e) {
+                              JSONObject r = new JSONObject();
+                              try { r.put("error", e.toString()); } catch (Exception ig) { }
+                              reply(id, r);
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void printPdf(final String html, final String name) {
+                      runOnUiThread(() -> loadForPrint(html, () -> {
+                          PrintManager pm = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+                          pm.print(name, pdfWeb.createPrintDocumentAdapter(name), new PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build());
+                      }));
                   }
 
                   @JavascriptInterface
@@ -1993,6 +2121,42 @@ jobs:
               $("v4msg").textContent = "已生成第 " + MAT.vers.length + " 版，可在上方下拉框切换各版本。";
             } catch (e) { $("v4msg").textContent = "重写失败：" + e.message; }
             finally { CAP = null; btn.disabled = false; }
+          };
+
+          // ===== v1.5：导出 PDF / 图文 MD =====
+          const PCSS = "body{font-family:sans-serif;font-size:15px;line-height:1.75;color:#222;margin:0}" +
+            "h1{font-size:24px;border-bottom:2px solid #2f6fed;padding-bottom:6px}h2{font-size:20px;border-left:4px solid #2f6fed;padding-left:8px;margin-top:22px}h3{font-size:17px}" +
+            "a{color:inherit;text-decoration:none}code{background:#f2f2f2;padding:0 3px;border-radius:3px}" +
+            ".shot,.tbw,.mathd,table,img{page-break-inside:avoid;break-inside:avoid}.shot{margin:12px 0}.shot img{max-width:100%;border:1px solid #ddd;border-radius:6px;display:block}.shot figcaption{font-size:12px;color:#888}" +
+            ".tbw table{border-collapse:collapse;width:100%;font-size:14px}.tbw th,.tbw td{border:1px solid #bbb;padding:6px 8px;text-align:left;vertical-align:top}.tbw th{background:#eef2fb}" +
+            ".mathd{margin:10px 0}.katex{font-size:1.05em}h1,h2,h3{page-break-after:avoid;break-after:avoid}";
+          function pdfHtml(md) {
+            return '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="katex/katex.min.css"><style>' + PCSS +
+              '</style></head><body>' + render(md) + '</body></html>';
+          }
+          function curMd() { if (current) current.md = $("source").value; return current ? current.md : ""; }
+          function verTag() { return MAT && MAT.vers.length > 1 ? "_第" + ((MAT.cur || 0) + 1) + "版" : ""; }
+          (function () {
+            const d = document.createElement("div");
+            d.className = "v4bar";
+            d.innerHTML = '<button id="v5pdf">导出 PDF</button><button id="v5md" class="ghost">导出图文 MD</button><button id="v5prt" class="ghost">系统打印</button><span class="mute" id="v5msg"></span>';
+            $("v4bar").appendChild(d);
+          })();
+          $("v5pdf").onclick = async () => {
+            if (!current) return;
+            const b = $("v5pdf"); b.disabled = true; $("v5msg").textContent = "正在生成 PDF…";
+            try {
+              const r = await ncall("makePdf", pdfHtml(curMd()), safeName(current.title) + verTag() + ".pdf");
+              $("v5msg").textContent = r.msg; alert(r.msg + "\n\n如果打开后公式或图片缺失，可以改用“系统打印”→ 保存为 PDF。");
+            } catch (e) { $("v5msg").textContent = ""; alert("导出失败：" + e.message + "\n可以改用“系统打印”→ 保存为 PDF。"); }
+            finally { b.disabled = false; }
+          };
+          $("v5prt").onclick = () => { if (current && HAS_NATIVE) Native.printPdf(pdfHtml(curMd()), safeName(current.title)); };
+          $("v5md").onclick = () => {
+            if (!current || !HAS_NATIVE) return;
+            let miss = 0;
+            const md = curMd().replace(/\]\(img\/([^)\s]+)\)/g, (m, n) => { const b = Native.readB64(n); if (!b) { miss++; return m; } return "](data:image/jpeg;base64," + b + ")"; });
+            alert(Native.saveFile(safeName(current.title) + verTag() + "_图文.md", md) + (miss ? "\n有 " + miss + " 张图片找不到，保留了原链接。" : "\n图片已直接嵌入文件，换设备打开也能看到。"));
           };
           </script>
           </body>

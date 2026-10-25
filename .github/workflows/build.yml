@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 13
-                  versionName "1.5.6"
+                  versionCode 14
+                  versionName "1.5.7"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -1403,7 +1403,7 @@ jobs:
               <label>主题色</label><div class="chips" id="seedChips"></div>
             </div>
             <div class="gt">关于</div>
-            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.6</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
+            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.7</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
           </div></div>
 
           <div id="pg-det">
@@ -1865,7 +1865,7 @@ jobs:
             shot: localStorage.getItem("vtn_shot") !== "0",
             gap: parseInt(localStorage.getItem("vtn_gap") || "60"),
             sf: localStorage.getItem("vtn_sf") || "",
-            vm: localStorage.getItem("vtn_vm") || "Qwen/Qwen2.5-VL-72B-Instruct"
+            vm: localStorage.getItem("vtn_vm") || "Qwen/Qwen3-VL-32B-Instruct"
           };
           (function () {
             const st = document.createElement("style");
@@ -1881,14 +1881,14 @@ jobs:
               '<label>硅基流动 API Key（视频没有字幕时，用它把语音转成文字）</label>' +
               '<input id="sfKey" type="password" placeholder="sk-...">' +
               '<p class="mute" id="sfTip"></p>' +
-              '<label>识图模型（硅基流动，必须支持看图）</label><input id="vmName" placeholder="Qwen/Qwen2.5-VL-72B-Instruct">' +
+              '<label>识图模型（硅基流动，必须支持看图）</label><input id="vmName" placeholder="Qwen/Qwen3-VL-32B-Instruct">' +
               '<p class="mute">填了硅基流动 Key 时，截图交给这个模型识别；没填时用上面的大模型，它如果不支持看图，识图会全部失败。</p>';
             ($("pg-set") || document.body).appendChild(box);
             $("shotOn").checked = V3.shot;
             $("shotGap").value = String(V3.gap);
             $("sfKey").value = V3.sf;
             $("vmName").value = V3.vm;
-            $("vmName").oninput = () => { V3.vm = $("vmName").value.trim() || "Qwen/Qwen2.5-VL-72B-Instruct"; localStorage.setItem("vtn_vm", V3.vm); };
+            $("vmName").oninput = () => { V3.vm = $("vmName").value.trim() || "Qwen/Qwen3-VL-32B-Instruct"; localStorage.setItem("vtn_vm", V3.vm); };
             const tip = () => { $("sfTip").textContent = V3.sf ? "已填写：没字幕的视频会自动转写" : "未填写：没字幕的视频无法生成笔记"; };
             tip();
             $("shotOn").onchange = () => { V3.shot = $("shotOn").checked; localStorage.setItem("vtn_shot", V3.shot ? "1" : "0"); };
@@ -1994,18 +1994,36 @@ jobs:
               return Array.isArray(a) ? a.map(o => Object.assign({}, o, { content: String(o.content || "").replace(/\\n(?![a-zA-Z])/g, "\n") })) : [];
             } catch (e) { return []; }
           }
-          async function vchat(content) {
-            if (!V3.sf) return await chat([{ role: "user", content }]);
+          const VM_LIST = ["Qwen/Qwen3-VL-32B-Instruct", "Qwen/Qwen3-VL-30B-A3B-Instruct", "Qwen/Qwen3-VL-8B-Instruct"];
+          let VM_OK = null, VFAIL = null;
+          async function vcall(model, content) {
             const r = await http("POST", "https://api.siliconflow.cn/v1/chat/completions",
               { "Content-Type": "application/json", "Authorization": "Bearer " + V3.sf },
-              JSON.stringify({ model: V3.vm, messages: [{ role: "user", content }], temperature: 0.2 }));
+              JSON.stringify({ model, messages: [{ role: "user", content }], temperature: 0.2 }));
             let j = null; try { j = JSON.parse(r.body); } catch (e) {}
-            if (r.status !== 200 || !j || !j.choices) {
-              const m = (j && (j.message || (j.error && j.error.message))) || String(r.body || "").slice(0, 200);
-              const tip = { 401: "硅基流动 Key 不对", 402: "硅基流动余额不足", 403: "硅基流动余额不足或无权限", 429: "识图请求太频繁" }[r.status] || "识图模型请求失败";
-              throw new Error(tip + "（状态码 " + r.status + "，模型 " + V3.vm + "）：" + m);
+            if (r.status === 200 && j && j.choices) return { ok: true, txt: j.choices[0].message.content };
+            const m = (j && (j.message || (j.error && j.error.message))) || String(r.body || "").slice(0, 200);
+            return { ok: false, status: r.status, m, bad: /disabled|not exist|does not exist|not found|invalid model/i.test(m) || r.status === 404 };
+          }
+          async function vchat(content) {
+            if (!V3.sf) return await chat([{ role: "user", content }]);
+            if (VFAIL) throw VFAIL;
+            const tries = [VM_OK || V3.vm].concat(VM_LIST).filter((x, i, a) => x && a.indexOf(x) === i);
+            let last = null;
+            for (const model of tries) {
+              const r = await vcall(model, content);
+              if (r.ok) {
+                if (model !== V3.vm && VM_OK !== model) log("识图模型 " + V3.vm + " 不可用，已自动改用 " + model, "o");
+                VM_OK = model; return r.txt;
+              }
+              last = r;
+              if (!r.bad) break;
+              log("识图模型 " + model + " 不可用（" + r.m + "），换下一个试试");
             }
-            return j.choices[0].message.content;
+            const tip = { 401: "硅基流动 Key 不对", 402: "硅基流动余额不足", 403: "硅基流动拒绝请求", 429: "识图请求太频繁" }[last.status] || "识图模型请求失败";
+            const err = new Error(tip + "（状态码 " + last.status + "）：" + last.m + "。可在设置里换一个带 VL 的识图模型");
+            if (last.bad || last.status === 401 || last.status === 402) VFAIL = err;
+            throw err;
           }
           async function readFrames(frames) {
             const starts = []; for (let i = 0; i < frames.length; i += 4) starts.push(i);
@@ -2268,7 +2286,7 @@ jobs:
             $("log").innerHTML = "";
             $("goBtn").disabled = $("subOnly").disabled = true;
             if ($("resumeBox")) $("resumeBox").style.display = "none";
-            let st = PENDING_ST; PENDING_ST = null;
+            let st = PENDING_ST; PENDING_ST = null; VFAIL = null;
             try {
               if (st) { applySt(st); subOnly = !!st.sub; TASK = st; log("继续上次没完成的任务：" + (st.title || st.input), "o"); }
               else {
@@ -2716,7 +2734,7 @@ jobs:
             window.__busy = true;
             try { if (HAS_NATIVE && Native.bgStart) Native.bgStart(s ? "正在提取字幕" : "正在生成笔记"); } catch (e) {}
             try { return await _runBg(s); }
-            finally { window.__busy = false; try { if (HAS_NATIVE && Native.bgStop) Native.bgStop(); } catch (e) {} }
+            finally { window.__busy = false; try { if (HAS_NATIVE && Native.bgStop) Native.bgStop(); } catch (e) {} showResume(); }
           };
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);
@@ -2739,8 +2757,11 @@ jobs:
             if (sk) {
               try {
                 const r = await http("GET", "https://api.siliconflow.cn/v1/user/info", { "Authorization": "Bearer " + sk }, "");
-                const d = (JSON.parse(r.body) || {}).data || {};
-                out.push("硅基流动余额：" + (d.totalBalance != null ? d.totalBalance : (d.balance != null ? d.balance : "查不到")) + " 元");
+                let j = null; try { j = JSON.parse(r.body); } catch (e) {}
+                const d = (j && (j.data || j)) || {};
+                const b = d.totalBalance != null ? d.totalBalance : (d.balance != null ? d.balance : null);
+                if (b != null) out.push("硅基流动余额：" + b + " 元" + (d.chargeBalance != null ? "（其中充值 " + d.chargeBalance + " 元）" : ""));
+                else out.push("硅基流动查不到余额（状态码 " + r.status + "）：" + String(r.body || r.error || "").slice(0, 150));
               } catch (e) { out.push("硅基流动查询失败：" + e.message); }
             }
             $("balTxt").textContent = out.join("\n"); $("balTxt").style.whiteSpace = "pre-line";

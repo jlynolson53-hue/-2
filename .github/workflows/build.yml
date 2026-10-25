@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 10
-                  versionName "1.5.3"
+                  versionCode 11
+                  versionName "1.5.4"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -449,68 +449,6 @@ jobs:
           </adaptive-icon>
           VTN_EOF
           mkdir -p app/src/main/java/com/vtn/lite
-          mkdir -p app/src/main/java/android/print
-          cat > app/src/main/java/android/print/PdfPrint.java <<'VTN_EOF'
-          package android.print;
-
-          import android.os.CancellationSignal;
-          import android.os.ParcelFileDescriptor;
-          import java.io.File;
-
-          public class PdfPrint {
-              public interface Done { void ok(File f); void fail(String m); default void step(String m) { } }
-              private final PrintAttributes attrs;
-              static boolean endsWithEof(File f) {
-                  try {
-                      java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r");
-                      long n = r.length(); int k = (int) Math.min(64, n);
-                      byte[] b = new byte[k]; r.seek(n - k); r.readFully(b); r.close();
-                      return new String(b, "ISO-8859-1").contains("%%EOF");
-                  } catch (Exception e) { return false; }
-              }
-              public PdfPrint(PrintAttributes a) { attrs = a; }
-              public void print(final PrintDocumentAdapter ad, final File out, final Done cb) {
-                  try { ad.onStart(); } catch (Exception ignored) { }
-                  cb.step("1/3 开始排版");
-                  ad.onLayout(null, attrs, new CancellationSignal(), new PrintDocumentAdapter.LayoutResultCallback() {
-                      @Override
-                      public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
-                          cb.step("2/3 排版完成，正在写入 PDF（" + (info == null ? "?" : String.valueOf(info.getPageCount())) + " 页）");
-                          final java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean(false);
-                          try {
-                              final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(out,
-                                  ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE | ParcelFileDescriptor.MODE_READ_WRITE);
-                              ad.onWrite(new PageRange[]{PageRange.ALL_PAGES}, pfd, new CancellationSignal(), new PrintDocumentAdapter.WriteResultCallback() {
-                                  @Override
-                                  public void onWriteFinished(PageRange[] pages) {
-                                      try { pfd.close(); } catch (Exception ignored) { }
-                                      if (!done.getAndSet(true)) cb.ok(out);
-                                  }
-                                  @Override
-                                  public void onWriteFailed(CharSequence e) { if (!done.getAndSet(true)) cb.fail(String.valueOf(e)); }
-                              });
-                              new Thread(() -> {
-                                  long last = -1; int same = 0;
-                                  for (int t = 0; t < 120 && !done.get(); t++) {
-                                      try { Thread.sleep(1000); } catch (Exception ignored) { }
-                                      long len = out.length();
-                                      if (len > 0) cb.step("2/3 正在写入 PDF（已写 " + (len / 1024) + " KB）");
-                                      if (len > 0 && len == last) same++; else same = 0;
-                                      last = len;
-                                      if (same >= 3 && endsWithEof(out)) {
-                                          if (!done.getAndSet(true)) { try { pfd.close(); } catch (Exception ignored) { } cb.ok(out); }
-                                          return;
-                                      }
-                                  }
-                              }).start();
-                          } catch (Exception e) { cb.fail(e.toString()); }
-                      }
-                      @Override
-                      public void onLayoutFailed(CharSequence e) { cb.fail(String.valueOf(e)); }
-                  }, null);
-              }
-          }
-          VTN_EOF
           cat > app/src/main/java/com/vtn/lite/MainActivity.java <<'VTN_EOF'
           package com.vtn.lite;
 
@@ -557,7 +495,6 @@ jobs:
           import android.media.MediaMuxer;
           import android.util.Base64;
           import org.json.JSONArray;
-          import android.print.PdfPrint;
           import android.print.PrintAttributes;
           import android.print.PrintManager;
 
@@ -607,16 +544,19 @@ jobs:
               }
 
               @Override
+
+              @Override
               public void onBackPressed() {
                   String u = web.getUrl();
                   if (u != null && !u.startsWith("file:")) {
                       CookieManager.getInstance().flush();
                       web.loadUrl(HOME);
-                  } else {
-                      super.onBackPressed();
+                      return;
                   }
+                  web.evaluateJavascript("(window.__back&&window.__back())?'1':'0'", v -> {
+                      if (v == null || !v.contains("1")) super.onBackPressed();
+                  });
               }
-
               private static String readAll(InputStream in) throws Exception {
                   if (in == null) return "";
                   ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -835,7 +775,6 @@ jobs:
                   }
 
                   // ===== v1.5：导出 PDF =====
-                  private WebView pdfWeb;
 
                   private String saveBytes(String name, byte[] data, String mime) throws Exception {
                       if (Build.VERSION.SDK_INT >= 29) {
@@ -855,110 +794,10 @@ jobs:
                       }
                   }
 
-                  private void loadForPrint(final String html, final Runnable then) {
-                      pdfWeb = new WebView(MainActivity.this);
-                      WebSettings s = pdfWeb.getSettings();
-                      s.setJavaScriptEnabled(false);
-                      s.setAllowFileAccess(true);
-                      s.setAllowFileAccessFromFileURLs(true);
-                      s.setAllowUniversalAccessFromFileURLs(true);
-                      pdfWeb.setWebViewClient(new WebViewClient() {
-                          boolean done = false;
-                          @Override
-                          public void onPageFinished(WebView v, String u) {
-                              if (done) return;
-                              done = true;
-                              v.postDelayed(then, 1500);
-                          }
-                      });
-                      pdfWeb.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null);
-                  }
 
-                  @JavascriptInterface
-                  public void makePdf(final String id, final String html, final String name) {
-                      runOnUiThread(() -> {
-                          try {
-                              loadForPrint(html, () -> {
-                                  try {
-                                      PrintAttributes a = new PrintAttributes.Builder()
-                                          .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                                          .setResolution(new PrintAttributes.Resolution("pdf", "pdf", 600, 600))
-                                          .setMinMargins(new PrintAttributes.Margins(500, 500, 500, 500))
-                                          .build();
-                                      final File out = new File(getCacheDir(), "note_export.pdf");
-                                      new PdfPrint(a).print(pdfWeb.createPrintDocumentAdapter(name), out, new PdfPrint.Done() {
-                                          public void ok(final File f) {
-                                              new Thread(() -> {
-                                                  JSONObject r = new JSONObject();
-                                                  try { r.put("msg", saveBytes(name, readFile(f), "application/pdf")); }
-                                                  catch (Exception e) { try { r.put("error", e.toString()); } catch (Exception ig) { } }
-                                                  reply(id, r);
-                                              }).start();
-                                          }
-                                          public void fail(String m) {
-                                              JSONObject r = new JSONObject();
-                                              try { r.put("error", "生成 PDF 失败：" + m); } catch (Exception ig) { }
-                                              reply(id, r);
-                                          }
-                                      });
-                                  } catch (Exception e) {
-                                      JSONObject r = new JSONObject();
-                                      try { r.put("error", e.toString()); } catch (Exception ig) { }
-                                      reply(id, r);
-                                  }
-                              });
-                          } catch (Exception e) {
-                              JSONObject r = new JSONObject();
-                              try { r.put("error", e.toString()); } catch (Exception ig) { }
-                              reply(id, r);
-                          }
-                      });
-                  }
 
-                  @JavascriptInterface
-                  public void printPdf(final String html, final String name) {
-                      runOnUiThread(() -> loadForPrint(html, () -> {
-                          PrintManager pm = (PrintManager) getSystemService(Context.PRINT_SERVICE);
-                          pm.print(name, pdfWeb.createPrintDocumentAdapter(name), new PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build());
-                      }));
-                  }
 
                   // ===== v1.5.1：直接打印主界面（只打印 #v5print 区域）=====
-                  @JavascriptInterface
-                  public void makePdf2(final String id, final String name) {
-                      runOnUiThread(() -> {
-                          try {
-                              prog(id, "正在排版 PDF…");
-                              PrintAttributes a = new PrintAttributes.Builder()
-                                  .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                                  .setResolution(new PrintAttributes.Resolution("pdf", "pdf", 600, 600))
-                                  .setMinMargins(new PrintAttributes.Margins(500, 500, 500, 500))
-                                  .build();
-                              final File out = new File(getCacheDir(), "note_export.pdf");
-                              new PdfPrint(a).print(web.createPrintDocumentAdapter(name), out, new PdfPrint.Done() {
-                                  public void step(String m) { prog(id, m); }
-                                  public void ok(final File f) {
-                                      prog(id, "3/3 PDF 已生成，正在保存…");
-                                      new Thread(() -> {
-                                          JSONObject r = new JSONObject();
-                                          try { r.put("msg", saveBytes(name, readFile(f), "application/pdf")); }
-                                          catch (Exception e) { try { r.put("error", e.toString()); } catch (Exception ig) { } }
-                                          reply(id, r);
-                                      }).start();
-                                  }
-                                  public void fail(String m) {
-                                      JSONObject r = new JSONObject();
-                                      try { r.put("error", "生成 PDF 失败：" + m); } catch (Exception ig) { }
-                                      reply(id, r);
-                                  }
-                              });
-                          } catch (Throwable e) {
-                              JSONObject r = new JSONObject();
-                              try { r.put("error", e.toString()); } catch (Exception ig) { }
-                              reply(id, r);
-                          }
-                      });
-                  }
 
                   @JavascriptInterface
                   public String printPdf2(final String name) {
@@ -972,6 +811,26 @@ jobs:
                           }
                       });
                       return "ok";
+                  }
+
+                  @JavascriptInterface
+                  public void setBars(final String color, final boolean light) {
+                      runOnUiThread(() -> {
+                          try {
+                              int c = android.graphics.Color.parseColor(color);
+                              getWindow().setStatusBarColor(c);
+                              getWindow().setNavigationBarColor(c);
+                              int f = getWindow().getDecorView().getSystemUiVisibility();
+                              if (light) {
+                                  f |= android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                                  if (Build.VERSION.SDK_INT >= 26) f |= android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                              } else {
+                                  f &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                                  if (Build.VERSION.SDK_INT >= 26) f &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                              }
+                              getWindow().getDecorView().setSystemUiVisibility(f);
+                          } catch (Exception ignored) { }
+                      });
                   }
 
                   @JavascriptInterface
@@ -1193,78 +1052,251 @@ jobs:
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <title>视频笔记</title>
           <style>
-          :root{--bg:#f3f5f9;--card:#fff;--fg:#1f2328;--mute:#6b7280;--pri:#2563eb;--pri2:#dbeafe;--bd:#e5e7eb;--err:#dc2626;--ok:#16a34a;--sh:0 1px 3px rgba(0,0,0,.06);color-scheme:light}
-          :root[data-theme=dark]{--bg:#0f1115;--card:#1a1d24;--fg:#e6e6e6;--mute:#9aa0a6;--bd:#2c313a;--pri:#60a5fa;--pri2:#1e3a5f;--ok:#4ade80;--err:#f87171;--sh:none;color-scheme:dark}
+          @font-face{font-family:"Material Symbols Rounded";font-style:normal;font-weight:400;font-display:block;src:url(ms/material-symbols-rounded.woff2) format("woff2")}
+          :root{--primary:#0b57d0;--on-primary:#fff;--primary-container:#d3e3fd;--on-primary-container:#041e49;--secondary-container:#c2e7ff;--on-secondary-container:#001d35;
+          --background:#f6f8fc;--surface:#fff;--surface-container-low:#f8fafd;--surface-container:#f0f4f9;--surface-container-high:#e9eef6;--on-surface:#1f1f1f;--on-surface-variant:#444746;
+          --outline:#747775;--outline-variant:#c4c7c5;--error:#b3261e;--error-container:#f9dedc;--inverse-surface:#303030;--inverse-on-surface:#f2f2f2;
+          --bd:var(--outline-variant);--bg:var(--background);--mute:var(--on-surface-variant);--card:var(--surface-container-low);--fg:var(--on-surface);--pri:var(--primary);color-scheme:light}
+          :root[data-theme=dark]{--primary:#a8c7fa;--on-primary:#062e6f;--primary-container:#0842a0;--on-primary-container:#d3e3fd;--secondary-container:#004a77;--on-secondary-container:#c2e7ff;
+          --background:#131314;--surface:#1b1b1c;--surface-container-low:#1e1f20;--surface-container:#232425;--surface-container-high:#2d2f31;--on-surface:#e3e3e3;--on-surface-variant:#c4c7c5;
+          --outline:#8e918f;--outline-variant:#444746;--error:#f2b8b5;--error-container:#8c1d18;--inverse-surface:#e3e3e3;--inverse-on-surface:#303030;color-scheme:dark}
           *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-          body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px;padding-bottom:76px;transition:background .2s,color .2s}
-          .top{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;padding:12px 20px}
-          .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(#2563eb,#1d4ed8);display:grid;place-items:center;color:#fff;font-size:16px}
-          .top b{font-size:19px}.top .chip{cursor:pointer}.top .sp{flex:1}
-          .chip{font-size:13px;padding:5px 12px;border-radius:99px;background:var(--bg);color:var(--mute);border:1px solid var(--bd)}
-          .chip.ok{color:var(--ok);border-color:var(--ok)}
-          .wrap{max-width:1280px;margin:0 auto;padding:16px 20px}
-          .card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:var(--sh)}
-          .card h2{font-size:18px;margin:0 0 12px}
-          label{display:block;font-size:14px;color:var(--mute);margin:10px 0 6px}
-          input,textarea,select{width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--fg);font-size:16px;outline:none}
-          input:focus,textarea:focus,select:focus{border-color:var(--pri)}
-          textarea{min-height:80px;resize:vertical}
-          button{padding:11px 18px;border:0;border-radius:10px;background:var(--pri);color:#fff;font-size:16px;margin:8px 8px 0 0;cursor:pointer}
-          :root[data-theme=dark] button:not(.sec):not(.ghost){color:#0f1115}
-          button.sec{background:transparent;color:var(--pri);border:1px solid var(--pri)}
-          button.ghost{background:var(--pri2);color:var(--pri)}
-          button.big{padding:14px 28px;font-size:17px;font-weight:600}
-          button:disabled{opacity:.5}
-          .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
-          .mute{color:var(--mute);font-size:14px}
-          .sw{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:12px;border:1px solid var(--bd);border-radius:12px;color:var(--fg);font-size:15px;cursor:pointer}
-          .sw small{display:block;color:var(--mute);font-size:13px;margin-top:2px}
-          .sw input{display:none}
-          .sw i{flex:none;width:48px;height:28px;border-radius:99px;background:var(--bd);position:relative;transition:.2s}
-          .sw i::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
-          .sw input:checked+i{background:var(--pri)}
-          .sw input:checked+i::after{left:23px}
-          .seg{display:flex;border:1px solid var(--bd);border-radius:12px;overflow:hidden;margin-top:6px}
-          .seg button{flex:1;margin:0;border-radius:0;background:transparent;color:var(--fg);padding:12px 0}
-          .seg button.on{background:var(--pri);color:#fff}
-          :root[data-theme=dark] .seg button.on{color:#0f1115}
-          .req{margin-top:14px;border:1px dashed var(--pri);border-radius:12px;padding:10px 12px;background:var(--pri2)}
-          .req summary{cursor:pointer;font-weight:600;color:var(--pri)}
-          .req summary em{font-style:normal;font-weight:400;font-size:13px;margin-left:6px;color:var(--ok)}
-          .req textarea{min-height:110px;margin-top:8px;background:var(--card)}
-          .pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-          .pills button{margin:0;padding:6px 12px;font-size:14px;border-radius:99px;background:var(--card)!important;color:var(--fg)!important;border:1px solid var(--bd)}
-          #log{white-space:pre-wrap;font-size:14px;color:var(--mute);max-height:180px;overflow:auto;margin-top:12px;background:var(--bg);border-radius:10px}
-          #log:not(:empty){padding:10px 12px}
-          #log .e{color:var(--err)}#log .o{color:var(--ok)}
-          .busy{height:4px;border-radius:4px;background:var(--pri2);overflow:hidden;margin-top:12px;display:none}
-          .busy i{display:block;height:100%;width:30%;background:var(--pri);border-radius:4px;animation:mv 1.2s infinite ease-in-out}
-          @keyframes mv{0%{margin-left:-30%}100%{margin-left:100%}}
-          .bar{display:flex;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--bd);padding-bottom:12px}
-          .bar details{position:relative;display:inline-block}
-          .bar details summary{list-style:none;padding:11px 18px;margin:8px 8px 0 0;border-radius:10px;border:1px solid var(--bd);color:var(--mute);cursor:pointer}
-          .bar details summary::-webkit-details-marker{display:none}
-          .menu{position:absolute;z-index:4;top:56px;left:0;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:6px 10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.25);width:200px}
-          .menu button{width:100%;margin:6px 0 0}
-          #preview{line-height:1.85;font-size:17px;overflow-wrap:anywhere;max-width:860px;margin:16px auto 0}
-          #preview h1{font-size:24px}#preview h2{font-size:20px;border-left:4px solid var(--pri);padding-left:10px;margin-top:28px}#preview h3{font-size:18px;color:var(--pri)}
-          #preview code{background:var(--bg);padding:1px 5px;border-radius:5px}
-          #preview a.ts{color:var(--pri);text-decoration:none;font-family:monospace;background:var(--pri2);padding:0 6px;border-radius:6px;font-size:14px}
-          #preview hr{border:0;border-top:1px solid var(--bd)}
-          #source{min-height:420px;font-family:monospace;font-size:14px;margin-top:12px}
-          .hist{padding:14px 4px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;gap:10px;align-items:center;cursor:pointer}
-          .hist:last-child{border-bottom:0}
-          .hist span{flex:1;font-size:16px}.hist small{display:block;color:var(--mute);font-size:13px;margin-top:4px}
-          .hist button{margin:0}
-          .tag{font-size:12px;font-style:normal;padding:1px 6px;border-radius:6px;background:var(--pri2);color:var(--pri);margin-right:6px}
-          .empty{text-align:center;padding:40px 0;color:var(--mute)}
-          .page{display:none}.page.on{display:block}
-          .nav{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--card);border-top:1px solid var(--bd);display:flex;justify-content:center}
-          .nav button{flex:0 1 180px;background:transparent!important;color:var(--mute)!important;margin:0;border-radius:0;padding:8px 0 10px;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:2px}
-          .nav button span{font-size:22px;line-height:1}
-          .nav button.on{color:var(--pri)!important;font-weight:600}
-          @media (min-width:1100px){#pg-gen.on{display:grid;grid-template-columns:420px 1fr;gap:16px;align-items:start}#pg-gen .side{position:sticky;top:76px}}
+          html,body{margin:0;background:var(--background);color:var(--on-surface);font-family:"Google Sans","Noto Sans SC",system-ui,sans-serif;font-size:16px;line-height:1.6}
+          body{padding-bottom:96px}
+          .ic{font-family:"Material Symbols Rounded";font-weight:normal;font-style:normal;font-size:24px;line-height:1;letter-spacing:normal;text-transform:none;display:inline-block;white-space:nowrap;direction:ltr;font-feature-settings:"liga";-webkit-font-smoothing:antialiased;vertical-align:middle;user-select:none}
+          .ic.fb{font-family:inherit;font-size:13px;font-weight:500}
+          .wrap{max-width:840px;margin:0 auto;padding:0 16px}
+          h1.hd{font-size:32px;line-height:40px;font-weight:400;margin:24px 0 16px}
+          h2{font-size:22px;line-height:28px;font-weight:500;margin:0 0 12px}
+          .mute{color:var(--on-surface-variant);font-size:14px}
+          label{display:block;font-size:12px;font-weight:500;color:var(--on-surface-variant);margin:8px 0 0;letter-spacing:.3px}
+          input,textarea,select{font:inherit;font-size:16px;width:100%;color:var(--on-surface);background:transparent;border:1px solid var(--outline);border-radius:4px;padding:14px 16px;margin:4px 0 12px;outline:none}
+          input:focus,textarea:focus,select:focus{border:2px solid var(--primary);padding:13px 15px}
+          textarea{min-height:88px;resize:vertical}
+          select option{background:var(--surface);color:var(--on-surface)}
+          button{font:inherit;font-size:14px;font-weight:500;letter-spacing:.1px;border:0;border-radius:999px;padding:10px 24px;min-height:40px;background:var(--primary);color:var(--on-primary);cursor:pointer;position:relative;overflow:hidden;margin:4px 8px 4px 0;transition:box-shadow .2s,background .2s}
+          button:disabled{opacity:.38;cursor:default}
+          button.sec,button.ghost{background:var(--secondary-container);color:var(--on-secondary-container)}
+          button.text{background:transparent;color:var(--primary);padding:10px 12px}
+          button.big{width:100%;min-height:56px;font-size:16px;margin:16px 0 8px}
+          button.icon{background:transparent;color:var(--on-surface-variant);width:48px;height:48px;min-height:0;padding:0;margin:0;display:inline-flex;align-items:center;justify-content:center;flex:none}
+          .card{background:var(--surface-container-low);border-radius:16px;padding:20px;margin:0 0 16px;border:1px solid var(--outline-variant)}
+          [data-theme=dark] .card{border-color:transparent}
+          .page{display:none}.page.on{display:block;animation:fadeup .25s ease}
+          @keyframes fadeup{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+          details>summary{cursor:pointer;font-weight:500;list-style:none;display:flex;align-items:center;gap:8px;min-height:40px}
+          details>summary::-webkit-details-marker{display:none}
+          details>summary::after{content:"expand_more";font-family:"Material Symbols Rounded";font-size:24px;margin-left:auto;transition:transform .2s;color:var(--on-surface-variant)}
+          details[open]>summary::after{transform:rotate(180deg)}
+          .req{margin:8px 0;padding:4px 16px;border-radius:12px;background:var(--surface-container)}
+          .req em{font-style:normal;font-size:12px;color:var(--primary);margin-left:4px}
+          .chips,.pills{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+          .chip5,.pills button{display:inline-flex;align-items:center;gap:6px;height:32px;min-height:32px;padding:0 16px;margin:0;border-radius:8px;border:1px solid var(--outline);background:transparent;color:var(--on-surface-variant);font-size:14px}
+          .chip5.on{background:var(--secondary-container);border-color:transparent;color:var(--on-secondary-container)}
+          .chip5.on::before{content:"check";font-family:"Material Symbols Rounded";font-size:18px}
+          .chip5.noc::before{content:none}
+          .chip5.sm{height:24px;min-height:24px;padding:0 8px;font-size:12px}
+          .seg{display:flex;border:1px solid var(--outline);border-radius:999px;overflow:hidden;margin:8px 0 12px}
+          .seg button{flex:1;margin:0;border-radius:0;background:transparent;color:var(--on-surface);border-right:1px solid var(--outline)}
+          .seg button:last-child{border-right:0}
+          .seg button.on{background:var(--secondary-container);color:var(--on-secondary-container)}
+          .sw{display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:16px;font-weight:400;color:var(--on-surface);padding:12px 0;margin:0;cursor:pointer;letter-spacing:0}
+          .sw small{display:block;font-size:14px;color:var(--on-surface-variant)}
+          .sw input{position:absolute;opacity:0;width:0;height:0;margin:0;padding:0}
+          .sw i{flex:none;position:relative;width:52px;height:32px;border-radius:16px;background:var(--surface-container-high);border:2px solid var(--outline);transition:.2s}
+          .sw i::after{content:"";position:absolute;left:6px;top:6px;width:16px;height:16px;border-radius:50%;background:var(--outline);transition:.2s}
+          .sw input:checked+i{background:var(--primary);border-color:var(--primary)}
+          .sw input:checked+i::after{left:22px;top:2px;width:24px;height:24px;background:var(--on-primary)}
+          .frow{display:flex;gap:4px;align-items:flex-start}.frow textarea{flex:1;min-height:64px}
+          .pw{display:flex;align-items:center;gap:4px}.pw input{flex:1}
+          #busy{display:none!important}
+          #log{font-size:13px;line-height:1.6;max-height:320px;overflow:auto;font-family:ui-monospace,monospace;white-space:pre-wrap;word-break:break-all}
+          #log .e{color:var(--error);font-weight:600}#log .o{color:var(--primary)}
+          .lin{height:4px;border-radius:2px;background:var(--secondary-container);overflow:hidden;margin:4px 0 16px}
+          .lin i{display:block;height:100%;width:40%;background:var(--primary);border-radius:2px;animation:lin 1.4s ease-in-out infinite}
+          @keyframes lin{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}
+          #steps{list-style:none;margin:0;padding:0}
+          #steps li{display:flex;align-items:center;gap:12px;padding:8px 0;color:var(--on-surface-variant)}
+          #steps li .ic{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:18px;background:var(--surface-container-high)}
+          #steps li.cur{color:var(--on-surface);font-weight:600}#steps li.cur .ic{background:var(--primary);color:var(--on-primary)}
+          #steps li.done .ic{background:var(--secondary-container);color:var(--on-secondary-container)}
+          #progErr{color:var(--error);font-weight:600;white-space:pre-wrap;margin-top:8px}
+          .nav{position:fixed;left:0;right:0;bottom:0;height:80px;background:var(--surface-container);display:flex;justify-content:center;z-index:90}
+          .nav button{flex:1;max-width:200px;background:transparent;color:var(--on-surface-variant);border-radius:0;margin:0;padding:12px 0 16px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12px}
+          .nav .pill{width:64px;height:32px;border-radius:16px;display:flex;align-items:center;justify-content:center;transition:background .2s}
+          .nav button.on{color:var(--on-surface);font-weight:700}.nav button.on .pill{background:var(--secondary-container);color:var(--on-secondary-container)}
+          @media (min-width:841px){body{padding-bottom:24px;padding-left:80px}.nav{top:0;right:auto;width:80px;height:auto;flex-direction:column;justify-content:flex-start;padding-top:24px;gap:12px}.nav button{flex:none;padding:4px 0}}
+          .search{display:flex;align-items:center;gap:8px;height:56px;border-radius:28px;background:var(--surface-container-high);padding:0 8px 0 16px;margin:0 0 16px}
+          .search input{border:0!important;margin:0;padding:0!important;height:56px}
+          .nc{display:flex;align-items:center;gap:16px;padding:12px;border-radius:16px;background:var(--surface-container-low);margin:0 0 8px;cursor:pointer;position:relative;overflow:hidden}
+          .nc .th{width:80px;height:56px;border-radius:8px;object-fit:cover;flex:none;background:var(--surface-container-high);display:flex;align-items:center;justify-content:center;color:var(--on-surface-variant)}
+          .nc .nb{flex:1;min-width:0}.nc .nt{font-size:16px;font-weight:500;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+          .empty5{text-align:center;padding:64px 16px;color:var(--on-surface)}.empty5 .ic{font-size:96px;color:var(--outline);display:block;margin:0 auto 16px}
+          .gt{color:var(--primary);font-size:14px;font-weight:500;margin:24px 16px 8px}
+          .grp{background:var(--surface-container-low);border-radius:16px;padding:8px 20px 16px;margin:0 0 8px}
+          .li{display:flex;justify-content:space-between;align-items:center;padding:12px 0}
+          .seed{width:40px;height:40px;border-radius:50%;padding:0;min-height:0;margin:0 8px 0 0;border:3px solid transparent}
+          .seed.on{border-color:var(--on-surface)}
+          #pg-det{position:fixed;inset:0;background:var(--background);overflow:auto;z-index:100;display:none;padding-bottom:96px}
+          #pg-det.show{display:block;animation:slidein .25s ease}
+          @keyframes slidein{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+          .appbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:4px;height:64px;padding:0 4px;background:var(--background)}
+          .appbar .abt{flex:1;min-width:0;font-size:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+          #resTitle{display:none}
+          #resCard{background:var(--surface);border:0;padding:8px 20px 24px}
+          #v4bar>.v4bar,#v4rev{display:none!important}
+          #v4note{background:var(--surface-container);border-radius:12px;padding:12px 16px;margin:0 0 12px;font-size:14px;white-space:pre-wrap}
+          .vchips{display:flex;gap:8px;overflow-x:auto;padding:4px 0 12px;scrollbar-width:none}.vchips::-webkit-scrollbar{display:none}.vchips .chip5{flex:none}
+          #preview{font-size:16px;line-height:1.75;word-break:break-word}
+          #preview h1{font-size:28px;line-height:36px;font-weight:400;margin:16px 0}
+          #preview h2{font-size:22px;margin:28px 0 12px;padding-left:12px;border-left:4px solid var(--primary)}
+          #preview h3{font-size:18px;margin:20px 0 8px}
+          #preview code{background:var(--surface-container-high);padding:0 4px;border-radius:4px}
+          #preview a.ts{color:var(--primary);text-decoration:none;font-size:13px}
+          #preview .shot img{border-radius:16px;cursor:zoom-in}
+          #source{min-height:60vh;font-family:ui-monospace,monospace;font-size:14px}
+          .fab{position:fixed;right:16px;bottom:16px;height:56px;border-radius:16px;padding:0 20px 0 16px;display:flex;align-items:center;gap:12px;background:var(--primary-container);color:var(--on-primary-container);box-shadow:0 3px 8px rgba(0,0,0,.25);z-index:6;margin:0;font-size:16px}
+          #scrim{position:fixed;inset:0;background:rgba(0,0,0,.32);z-index:1400;display:none}#scrim.show{display:block}#scrim.clear{background:transparent}
+          #sheet{position:fixed;left:0;right:0;bottom:0;max-width:640px;margin:0 auto;background:var(--surface-container-low);border-radius:28px 28px 0 0;padding:8px 24px 24px;z-index:1500;transform:translateY(105%);transition:transform .3s cubic-bezier(.2,0,0,1);max-height:85vh;overflow:auto}
+          #sheet.open{transform:none}
+          #sheet .handle{width:32px;height:4px;border-radius:2px;background:var(--outline);margin:8px auto 16px}
+          #pop{position:fixed;z-index:2200;min-width:200px;max-width:280px;background:var(--surface-container);border-radius:4px;padding:8px 0;box-shadow:0 4px 16px rgba(0,0,0,.25);display:none}
+          #pop.show{display:block;animation:fadeup .15s ease}
+          #pop button{display:flex;align-items:center;gap:12px;width:100%;margin:0;border-radius:0;background:transparent;color:var(--on-surface);padding:12px 16px;text-align:left;font-weight:400;font-size:15px}
+          #pop button .ic{color:var(--on-surface-variant);font-size:22px}
+          #snack{position:fixed;left:50%;bottom:96px;transform:translate(-50%,40px);opacity:0;max-width:min(560px,92vw);background:var(--inverse-surface);color:var(--inverse-on-surface);border-radius:4px;padding:14px 16px;font-size:14px;z-index:3000;transition:.25s;pointer-events:none;white-space:pre-line}
+          #snack.show{transform:translate(-50%,0);opacity:1}
+          #dlg{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,90vw);background:var(--surface-container-high);border-radius:28px;padding:24px;z-index:2500;display:none}
+          #dlg.show{display:block;animation:fadeup .2s ease}
+          #dlg h3{margin:0 0 16px;font-size:22px;font-weight:400;display:flex;align-items:center;gap:8px}#dlg h3 .ic{color:var(--error)}
+          #dlgTxt{white-space:pre-wrap;color:var(--on-surface-variant);font-size:14px;max-height:50vh;overflow:auto}
+          #viewer{position:fixed;inset:0;background:#000;z-index:2600;display:none;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
+          #viewer.show{display:flex}#viewer img{max-width:100%;max-height:100%;transform-origin:center;transition:none}
+          #viewer .vclose{position:absolute;top:12px;right:12px;color:#fff;background:rgba(255,255,255,.15)}
+          #v4page{padding:0!important;background:var(--background)!important}
+          #v4page .wrap{padding-bottom:32px}
+          .aisec{padding:8px 20px 16px}.aisec>summary{font-size:16px}
+          .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+          .fitem{background:var(--surface);border-radius:12px;padding:8px;min-width:0}
+          .fitem img{width:100%;border-radius:8px;display:block;cursor:zoom-in}
+          .fhd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px}
+          .prew{position:relative}.prew .cp{position:absolute;top:4px;right:4px;width:36px;height:36px}
+          .prew pre{padding-right:44px!important}
+          .rpl{position:absolute;border-radius:50%;background:currentColor;opacity:.18;transform:scale(0);animation:rp .45s ease-out forwards;pointer-events:none}
+          @keyframes rp{to{transform:scale(1);opacity:0}}
           </style>
+          <script>
+          (function(){var m=localStorage.getItem("vtn_theme")||"auto";var d=m==="dark"||(m==="auto"&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";})();
+          </script>
+          <link rel="stylesheet" href="katex/katex.min.css">
+          <script src="katex/katex.min.js"></script>
+          </head>
+          <body>
+          <span id="themeChip" hidden></span><span id="loginChip" hidden></span>
+
+          <div class="page on" id="pg-gen"><div class="wrap">
+            <h1 class="hd">视频转笔记</h1>
+            <div class="card" id="genCard">
+              <label for="input">B站链接或分享文字</label>
+              <div class="frow"><textarea id="input" rows="2" placeholder="支持 b23.tv 短链、BV号、完整链接"></textarea>
+                <button class="icon" id="pasteBtn" title="粘贴"><i class="ic" data-fb="粘贴">content_paste</i></button></div>
+              <label>分P（留空=自动识别）</label><input id="pnum" type="number" min="1" placeholder="自动" style="max-width:200px">
+              <select id="style" style="display:none"><option value="study">学习笔记</option><option value="brief">简要摘要</option><option value="detail">详细逐段</option></select>
+              <label>笔记风格</label><div class="chips" id="styleChips"></div>
+              <label>选项</label><div class="chips"><button class="chip5" id="chipTs">显示时间戳</button><button class="chip5" id="chipShot">截图笔记</button></div>
+              <label class="sw" style="display:none"><span>笔记中显示时间戳<small id="tsTip"></small></span><input type="checkbox" id="tsOn"><i></i></label>
+              <details class="req" id="reqBox">
+                <summary>我的要求<em id="reqOn"></em></summary>
+                <textarea id="req" placeholder="例如：这是高三物理复习课，重点整理解题方法；每个知识点后面列出易错点；最后出3道自测题。"></textarea>
+                <div class="pills" id="pills">
+                  <button>标出高考考点</button><button>列出易错点</button><button>例题写完整解题步骤</button>
+                  <button>保留老师的口诀和技巧</button><button>相似概念用表格对比</button><button>末尾出3道自测题（附答案）</button>
+                  <button>语言尽量简洁</button>
+                </div>
+                <button class="text" id="reqClear">清空</button>
+                <div class="mute" style="margin-bottom:8px">点上面的芯片可以快速添加。内容自动保存，以后每次生成都会用上。</div>
+              </details>
+              <button id="goBtn" class="big"><i class="ic" data-fb="">auto_awesome</i> 生成笔记</button>
+              <button class="text" id="subOnly">只提取字幕</button>
+            </div>
+            <div class="card" id="progCard" style="display:none">
+              <h2>正在生成</h2>
+              <div class="lin" id="progLin"><i></i></div>
+              <ol id="steps"></ol>
+              <div id="progErr"></div>
+              <div class="busy" id="busy"></div>
+            </div>
+            <details class="card" id="logBox"><summary>运行日志</summary><div id="log"></div></details>
+            <div id="hint" style="display:none"></div>
+          </div></div>
+
+          <div class="page" id="pg-lib"><div class="wrap">
+            <h1 class="hd">笔记库</h1>
+            <div class="search"><i class="ic" data-fb="">search</i><input id="libQ" placeholder="按标题搜索笔记"></div>
+            <div id="hist"></div>
+          </div></div>
+
+          <div class="page" id="pg-set"><div class="wrap">
+            <h1 class="hd">设置</h1>
+            <div class="gt">AI 模型与 API Key</div>
+            <div class="grp" id="setBox">
+              <label>接口地址（OpenAI 兼容）</label><input id="base" placeholder="https://api.deepseek.com">
+              <label>模型名</label><input id="model" placeholder="deepseek-flash">
+              <label>API Key</label><div class="pw"><input id="key" type="password" placeholder="sk-..."><button class="icon eye" data-for="key"><i class="ic" data-fb="显示">visibility</i></button></div>
+              <button id="saveSet">保存设置</button><button class="sec" id="testSet">测试连接</button>
+              <p class="mute">Key 只保存在本机，不会上传到别处。</p>
+            </div>
+            <div class="gt">截图识图 / 语音转写</div>
+            <div class="grp" id="grpShot"></div>
+            <div class="gt">B站账号</div>
+            <div class="grp">
+              <div id="loginState" class="mute" style="padding-top:8px">检测中…</div>
+              <button id="loginBtn">登录B站</button><button class="sec" id="logoutBtn">退出登录</button>
+              <p class="mute">B站的 AI 字幕通常要登录才能获取。登录成功后按“返回”键回到本应用。</p>
+            </div>
+            <div class="gt">外观</div>
+            <div class="grp">
+              <label>主题模式</label>
+              <div class="seg" id="themeSeg"><button data-m="light">浅色</button><button data-m="dark">深色</button><button data-m="auto">跟随系统</button></div>
+              <label>主题色</label><div class="chips" id="seedChips"></div>
+            </div>
+            <div class="gt">关于</div>
+            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.4</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
+          </div></div>
+
+          <div id="pg-det">
+            <div class="appbar"><button class="icon" id="detBack"><i class="ic" data-fb="返回">arrow_back</i></button><div class="abt" id="detTitle"></div><button class="icon" id="detMore"><i class="ic" data-fb="更多">more_vert</i></button></div>
+            <div class="wrap">
+              <div class="card" id="resCard" style="display:none">
+                <h2 id="resTitle">结果</h2>
+                <div class="bar" style="display:none">
+                  <button id="bSave">保存笔记</button><button class="ghost" id="bShare">分享</button>
+                  <details id="more"><summary>更多</summary><div class="menu">
+                    <button class="sec" id="tPrev">预览模式</button><button class="sec" id="tSrc">编辑源码</button>
+                    <button class="sec" id="bCopy">复制全文</button><button class="sec" id="bSrt">保存字幕 .srt</button>
+                  </div></details>
+                </div>
+                <div id="preview"></div>
+                <textarea id="source" style="display:none"></textarea>
+              </div>
+            </div>
+            <button class="fab" id="fab"><i class="ic" data-fb="">edit</i>修改笔记</button>
+          </div>
+
+          <div class="nav">
+            <button class="on" data-p="gen"><span class="pill"><i class="ic" data-fb="生">auto_awesome</i></span>生成</button>
+            <button data-p="lib"><span class="pill"><i class="ic" data-fb="库">library_books</i></span>笔记库</button>
+            <button data-p="set"><span class="pill"><i class="ic" data-fb="设">settings</i></span>设置</button>
+          </div>
+
+          <div id="scrim"></div>
+          <div id="sheet"><div class="handle"></div><h2>修改笔记</h2>
+            <p class="mute">写下修改意见，AI 会基于已保存的材料和当前这一版重写，不会重新截图或取字幕。</p>
+            <div id="sheetBody"></div><div class="lin" id="sheetLin" style="display:none"><i></i></div></div>
+          <div id="pop"></div>
+          <div id="snack"></div>
+          <div id="dlg"><h3><i class="ic" data-fb="!">error</i>出错了</h3><div id="dlgTxt"></div><div style="text-align:right;margin-top:16px"><button class="text" id="dlgOk">知道了</button></div></div>
+          <div id="viewer"><img alt=""><button class="icon vclose"><i class="ic" data-fb="关">close</i></button></div>
           <script>
           (function(){var m=localStorage.getItem("vtn_theme")||"auto";var d=m==="dark"||(m==="auto"&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";})();
           </script>
@@ -2301,6 +2333,340 @@ jobs:
               }
             } finally { window.__nativeProg = old; b.disabled = false; }
           };
+          // ===== v1.5.4：Material 3 界面层 =====
+          (function () { const p = $("v5pdf"); if (p) p.remove(); })();
+          // ---- 图标字体加载失败时用文字代替 ----
+          let ICON_OK = true;
+          function iconFallback(root) {
+            if (ICON_OK) return;
+            (root || document).querySelectorAll("i.ic").forEach(i => { if (!i.dataset.done) { i.dataset.done = "1"; i.classList.add("fb"); i.textContent = i.dataset.fb || ""; } });
+          }
+          if (document.fonts && document.fonts.load) {
+            document.fonts.load('24px "Material Symbols Rounded"', "home").then(f => { if (!f || !f.length) { ICON_OK = false; iconFallback(); } }).catch(() => { ICON_OK = false; iconFallback(); });
+          }
+          // ---- 主题色 ----
+          const SEEDS = {
+            blue:   { n: "蓝", l: ["#0b57d0", "#ffffff", "#d3e3fd", "#041e49", "#c2e7ff", "#001d35"], d: ["#a8c7fa", "#062e6f", "#0842a0", "#d3e3fd", "#004a77", "#c2e7ff"] },
+            green:  { n: "绿", l: ["#146c2e", "#ffffff", "#c4eed0", "#072711", "#d6e8d5", "#0f1f10"], d: ["#6dd58c", "#0a3818", "#0f5223", "#c4eed0", "#3a4b3a", "#d6e8d5"] },
+            purple: { n: "紫", l: ["#6750a4", "#ffffff", "#eaddff", "#21005d", "#e8def8", "#1d192b"], d: ["#d0bcff", "#381e72", "#4f378b", "#eaddff", "#4a4458", "#e8def8"] },
+            orange: { n: "橙", l: ["#8b5000", "#ffffff", "#ffdcbe", "#2c1600", "#f6dfcd", "#2a1709"], d: ["#ffb871", "#4a2800", "#6a3c00", "#ffdcbe", "#52443a", "#f6dfcd"] }
+          };
+          const BARBG = { l: "#f6f8fc", d: "#131314" };
+          function applyPalette() {
+            const dark = document.documentElement.dataset.theme === "dark";
+            const sd = SEEDS[localStorage.getItem("vtn_seed") || "blue"] || SEEDS.blue;
+            const c = dark ? sd.d : sd.l, st = document.documentElement.style;
+            [["--primary", c[0]], ["--on-primary", c[1]], ["--primary-container", c[2]], ["--on-primary-container", c[3]], ["--secondary-container", c[4]], ["--on-secondary-container", c[5]]]
+              .forEach(([k, v]) => st.setProperty(k, v));
+            if (HAS_NATIVE && Native.setBars) { try { Native.setBars(dark ? BARBG.d : BARBG.l, !dark); } catch (e) {} }
+            document.querySelectorAll("#seedChips .seed").forEach(b => b.classList.toggle("on", b.dataset.s === (localStorage.getItem("vtn_seed") || "blue")));
+          }
+          const _at5 = applyTheme;
+          applyTheme = function () { _at5(); applyPalette(); };
+          if (darkMQ && darkMQ.addEventListener) darkMQ.addEventListener("change", applyPalette);
+          (function () {
+            const box = $("seedChips");
+            Object.keys(SEEDS).forEach(k => {
+              const b = document.createElement("button"); b.className = "seed"; b.dataset.s = k; b.title = SEEDS[k].n;
+              b.style.background = SEEDS[k].l[0];
+              b.onclick = () => { localStorage.setItem("vtn_seed", k); applyPalette(); };
+              box.appendChild(b);
+            });
+          })();
+          applyTheme();
+          // ---- 提示条和错误对话框 ----
+          function snack(t) {
+            const s = $("snack"); s.textContent = String(t); s.classList.add("show");
+            clearTimeout(snack.t); snack.t = setTimeout(() => s.classList.remove("show"), 3500);
+          }
+          function scrimOn(clear) { $("scrim").classList.add("show"); $("scrim").classList.toggle("clear", !!clear); }
+          function scrimOff() { $("scrim").classList.remove("show", "clear"); }
+          function dialog(t) { $("dlgTxt").textContent = String(t); $("dlg").classList.add("show"); scrimOn(); }
+          function closeDlg() { $("dlg").classList.remove("show"); if (!$("sheet").classList.contains("open")) scrimOff(); }
+          $("dlgOk").onclick = closeDlg;
+          window.alert = function (m) {
+            m = String(m == null ? "" : m);
+            if (/失败|出错|错误|不对|无法|拿不到|没有拿到|请先/.test(m)) dialog(m); else snack(m);
+          };
+          // ---- 弹出菜单 ----
+          function closePop() { $("pop").classList.remove("show"); if (!$("sheet").classList.contains("open") && !$("dlg").classList.contains("show")) scrimOff(); }
+          function openMenu(anchor, items) {
+            const p = $("pop"); p.innerHTML = "";
+            items.forEach(([t, ic, fn]) => {
+              const b = document.createElement("button");
+              b.innerHTML = '<i class="ic" data-fb="">' + ic + '</i><span></span>'; b.querySelector("span").textContent = t;
+              b.onclick = e => { e.stopPropagation(); closePop(); fn(); };
+              p.appendChild(b);
+            });
+            iconFallback(p);
+            p.classList.add("show"); scrimOn(true);
+            const r = anchor.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+            let x = Math.min(r.right - w, innerWidth - w - 8), y = r.bottom + 4;
+            if (y + h > innerHeight - 8) y = Math.max(8, r.top - h - 4);
+            p.style.left = Math.max(8, x) + "px"; p.style.top = y + "px";
+          }
+          $("scrim").onclick = () => { if ($("pop").classList.contains("show")) closePop(); else if ($("dlg").classList.contains("show")) closeDlg(); else if ($("sheet").classList.contains("open")) closeSheet(); };
+          // ---- 涟漪效果 ----
+          document.addEventListener("pointerdown", e => {
+            const t = e.target.closest("button, .nc"); if (!t || t.disabled) return;
+            const r = t.getBoundingClientRect(), d = Math.max(r.width, r.height) * 2;
+            const sp = document.createElement("span"); sp.className = "rpl";
+            sp.style.width = sp.style.height = d + "px"; sp.style.left = (e.clientX - r.left - d / 2) + "px"; sp.style.top = (e.clientY - r.top - d / 2) + "px";
+            t.appendChild(sp); setTimeout(() => sp.remove(), 500);
+          });
+          // ---- 生成页：风格芯片、选项芯片、粘贴 ----
+          (function () {
+            const box = $("styleChips"), sel = $("style");
+            Array.from(sel.options).forEach(o => {
+              const b = document.createElement("button"); b.className = "chip5"; b.textContent = o.textContent; b.dataset.v = o.value;
+              b.onclick = () => { sel.value = o.value; localStorage.setItem("vtn_style", o.value); sync(); };
+              box.appendChild(b);
+            });
+            const sv = localStorage.getItem("vtn_style"); if (sv) sel.value = sv;
+            function sync() {
+              box.querySelectorAll(".chip5").forEach(b => b.classList.toggle("on", b.dataset.v === sel.value));
+              $("chipTs").classList.toggle("on", $("tsOn").checked);
+              $("chipShot").classList.toggle("on", !!($("shotOn") && $("shotOn").checked));
+            }
+            $("chipTs").onclick = () => { $("tsOn").checked = !$("tsOn").checked; $("tsOn").dispatchEvent(new Event("change")); sync(); snack($("tsTip").textContent); };
+            $("chipShot").onclick = () => { const c = $("shotOn"); if (!c) return; c.checked = !c.checked; c.dispatchEvent(new Event("change")); sync(); };
+            window.__syncChips = sync; sync();
+            $("pasteBtn").onclick = async () => {
+              try { const t = await navigator.clipboard.readText(); if (t) { $("input").value = t; snack("已粘贴"); return; } } catch (e) {}
+              $("input").focus(); snack("长按输入框，选择“粘贴”");
+            };
+          })();
+          // ---- 设置页：把截图卡片搬进分组、Key 显示/隐藏 ----
+          (function () {
+            const c = $("shotOn"); if (!c) return;
+            const old = c.closest(".card"), g = $("grpShot");
+            const sw = document.createElement("label"); sw.className = "sw";
+            sw.innerHTML = '<span>截图笔记<small>读取 PPT 题目和板书，并把截图插进笔记</small></span>';
+            c.removeAttribute("style"); sw.appendChild(c); sw.appendChild(document.createElement("i"));
+            g.appendChild(sw);
+            c.addEventListener("change", () => window.__syncChips && window.__syncChips());
+            Array.from(old.children).forEach(el => { if (el.tagName === "H2" || (el.tagName === "LABEL" && !el.textContent.trim() && !el.children.length)) return; if (el.tagName === "LABEL" && el.querySelector && el.querySelector("input[type=checkbox]") === null && /截图笔记/.test(el.textContent)) return; g.appendChild(el); });
+            old.remove();
+            const k = $("sfKey"); if (k) {
+              const w = document.createElement("div"); w.className = "pw"; k.parentNode.insertBefore(w, k); w.appendChild(k);
+              const b = document.createElement("button"); b.className = "icon eye"; b.dataset.for = "sfKey"; b.innerHTML = '<i class="ic" data-fb="显示">visibility</i>'; w.appendChild(b);
+            }
+            document.querySelectorAll(".eye").forEach(b => b.onclick = e => {
+              e.preventDefault(); const i = $(b.dataset.for); const show = i.type === "password";
+              i.type = show ? "text" : "password"; const ic = b.querySelector(".ic"); if (ICON_OK) ic.textContent = show ? "visibility_off" : "visibility"; else ic.textContent = show ? "隐藏" : "显示";
+            });
+            window.__syncChips && window.__syncChips();
+          })();
+          // ---- 生成进度视图 ----
+          const STEPS = [["subtitles", "取字幕 / 语音转写"], ["photo_camera", "截图"], ["image_search", "识图"], ["edit_note", "写笔记"]];
+          let stepIdx = -1;
+          function drawSteps() {
+            $("steps").innerHTML = STEPS.map((x, i) => '<li class="' + (i < stepIdx ? "done" : i === stepIdx ? "cur" : "") + '"><i class="ic" data-fb="' + (i + 1) + '">' + (i < stepIdx ? "check" : x[0]) + '</i>' + x[1] + '</li>').join("");
+            iconFallback($("steps"));
+          }
+          function setStep(i) { if (i <= stepIdx) return; stepIdx = i; drawSteps(); }
+          const _log5 = log;
+          log = function (msg, cls) {
+            _log5(msg, cls);
+            const m = String(msg);
+            if (/准备截图|截图去重/.test(m)) setStep(1);
+            else if (/识图/.test(m)) setStep(2);
+            else if (/大模型|写笔记|分段处理|全片概要/.test(m)) setStep(3);
+            else if (/视频信息|字幕|转写|语音|音频/.test(m)) setStep(0);
+            if (cls === "e") $("logBox").open = true;
+          };
+          const _run5 = run;
+          run = async function (sub) {
+            stepIdx = -1; drawSteps();
+            $("progErr").textContent = ""; $("progLin").style.display = "block";
+            $("progCard").style.display = "block"; $("genCard").style.display = "none"; $("logBox").open = false;
+            try { await _run5(sub); }
+            finally {
+              $("genCard").style.display = "block";
+              const L = $("log"), last = L.lastChild ? L.lastChild.textContent : "";
+              if (/^完成/.test(last)) { $("progCard").style.display = "none"; }
+              else {
+                const errs = L.querySelectorAll(".e");
+                $("progLin").style.display = "none";
+                $("progErr").textContent = errs.length ? errs[errs.length - 1].textContent : "没有完成，请查看运行日志";
+                $("logBox").open = true;
+              }
+            }
+          };
+          $("goBtn").onclick = () => run(false);
+          $("subOnly").onclick = () => run(true);
+          // ---- 笔记详情页 ----
+          function openDet() { const d = $("pg-det"); if (!d.classList.contains("show")) { d.classList.add("show"); d.scrollTop = 0; } }
+          function closeDet() { closeSheet(); $("pg-det").classList.remove("show"); }
+          $("detBack").onclick = () => window.__back();
+          (function () {
+            const v = document.createElement("div"); v.id = "verChips"; v.className = "vchips";
+            const bar = $("v4bar"); bar.parentNode.insertBefore(v, bar);
+            // 修改意见卡片放在版本芯片下面
+            v.after($("v4note"));
+          })();
+          function renderVer() {
+            const box = $("verChips");
+            if (typeof MAT === "undefined" || !MAT || !MAT.vers || !MAT.vers.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+            box.style.display = "flex"; box.innerHTML = "";
+            MAT.vers.forEach((x, i) => {
+              const b = document.createElement("button"); b.className = "chip5" + (i === (MAT.cur || 0) ? " on" : ""); b.textContent = "第" + (i + 1) + "版";
+              b.onclick = () => { $("v4ver").value = String(i); $("v4ver").onchange(); renderVer(); };
+              box.appendChild(b);
+            });
+          }
+          const _show5 = show;
+          show = function (item) {
+            const prev = document.querySelector(".page.on");
+            _show5(item);
+            if (prev && prev.id !== "pg-gen") tab(prev.id.slice(3));
+            $("detTitle").textContent = item.title;
+            renderVer();
+            $("fab").style.display = item.kind === "sub" ? "none" : "flex";
+            $("source").style.display = "none"; $("preview").style.display = "block";
+            openDet();
+          };
+          $("detMore").onclick = () => {
+            const src = $("source").style.display !== "none";
+            const hasMat = typeof MAT !== "undefined" && !!MAT;
+            openMenu($("detMore"), [
+              hasMat && ["AI 输入", "psychology", () => $("v4in").click()],
+              ["保存笔记", "save", () => $("bSave").click()],
+              ["导出图文 MD", "image", () => $("v5md").click()],
+              ["系统打印", "print", () => $("v5prt").click()],
+              ["分享", "share", () => $("bShare").click()],
+              ["复制全文", "content_copy", () => $("bCopy").click()],
+              ["保存字幕 .srt", "subtitles", () => $("bSrt").click()],
+              [src ? "返回预览" : "查看源码", src ? "visibility" : "code", () => $(src ? "tPrev" : "tSrc").click()]
+            ].filter(Boolean));
+          };
+          // ---- 底部面板：修改笔记 ----
+          (function () { const b = $("sheetBody"); ["v4txt", "v4go", "v4msg"].forEach(id => { const el = $(id); if (el) b.appendChild(el); }); $("v4go").classList.add("big"); $("v4go").textContent = "让 AI 重写"; })();
+          function openSheet() { $("sheet").classList.add("open"); scrimOn(); setTimeout(() => $("v4txt").focus(), 300); }
+          function closeSheet() { $("sheet").classList.remove("open"); if (!$("dlg").classList.contains("show")) scrimOff(); }
+          $("fab").onclick = () => {
+            if (typeof MAT === "undefined" || !MAT) { snack("这篇是旧版本生成的，没有保存材料，不能修改"); return; }
+            $("v4msg").textContent = ""; openSheet();
+          };
+          const _go5 = $("v4go").onclick;
+          $("v4go").onclick = async () => {
+            $("sheetLin").style.display = "block";
+            try { await _go5(); } finally { $("sheetLin").style.display = "none"; }
+            const m = $("v4msg").textContent;
+            if (/已生成/.test(m)) { closeSheet(); snack(m); renderVer(); $("pg-det").scrollTop = 0; }
+          };
+          // ---- AI 输入页 ----
+          const _ai5 = $("v4in").onclick;
+          $("v4in").onclick = () => { _ai5(); if ($("v4page").style.display === "block") enhanceAi(); };
+          function enhanceAi() {
+            const pg = $("v4page"), top = pg.querySelector(".v4top");
+            const bar = document.createElement("div"); bar.className = "appbar";
+            bar.innerHTML = '<button class="icon" id="aiBack"><i class="ic" data-fb="返回">arrow_back</i></button><div class="abt">AI 输入</div>';
+            const kids = Array.from(pg.children).filter(x => x !== top);
+            const box = document.createElement("div"); box.className = "wrap";
+            let cur = null, grid = null, item = null;
+            kids.forEach(el => {
+              if (el.tagName === "H3") {
+                cur = document.createElement("details"); cur.className = "card aisec"; cur.open = !/文字稿|请求/.test(el.textContent);
+                const sm = document.createElement("summary"); sm.textContent = el.textContent; cur.appendChild(sm); box.appendChild(cur); grid = null; item = null; return;
+              }
+              if (el.tagName === "DETAILS") { el.classList.add("card", "aisec"); box.appendChild(el); cur = null; return; }
+              if (!cur) { box.appendChild(el); return; }
+              if (el.tagName === "P" && /^图\d+/.test(el.textContent.trim())) {
+                if (!grid) { grid = document.createElement("div"); grid.className = "fgrid"; cur.appendChild(grid); }
+                const ps = el.textContent.split("·").map(x => x.trim());
+                item = document.createElement("div"); item.className = "fitem";
+                item.innerHTML = '<div class="fhd"><b></b><span class="chip5 on noc sm"></span><span class="mute"></span></div>';
+                item.querySelector("b").textContent = ps[0] || ""; item.querySelector(".chip5").textContent = ps[1] || ""; item.querySelector(".mute").textContent = ps[2] || "";
+                grid.appendChild(item); return;
+              }
+              if (item && (el.tagName === "IMG" || el.tagName === "PRE")) { item.appendChild(el); if (el.tagName === "PRE") item = null; return; }
+              cur.appendChild(el);
+            });
+            pg.innerHTML = ""; pg.appendChild(bar); pg.appendChild(box);
+            $("aiBack").onclick = () => window.__back();
+            pg.querySelectorAll("pre").forEach(p => {
+              const w = document.createElement("div"); w.className = "prew"; p.parentNode.insertBefore(w, p);
+              const b = document.createElement("button"); b.className = "icon cp"; b.innerHTML = '<i class="ic" data-fb="复制">content_copy</i>';
+              b.onclick = e => { e.preventDefault(); e.stopPropagation(); if (HAS_NATIVE) Native.copy(p.textContent); snack("已复制"); };
+              w.appendChild(b); w.appendChild(p);
+            });
+            iconFallback(pg); pg.scrollTop = 0;
+          }
+          // ---- 全屏看图（双指缩放）----
+          (function () {
+            const v = $("viewer"), im = v.querySelector("img"); let sc = 1, tx = 0, ty = 0, st = null;
+            const ap = () => { im.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + sc + ")"; };
+            window.openViewer = src => { im.src = src; sc = 1; tx = 0; ty = 0; ap(); v.classList.add("show"); };
+            window.closeViewer = () => v.classList.remove("show");
+            const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+            v.addEventListener("touchstart", e => {
+              if (e.touches.length === 2) st = { d: dist(e.touches), sc };
+              else if (e.touches.length === 1) st = { x: e.touches[0].clientX - tx, y: e.touches[0].clientY - ty };
+            }, { passive: true });
+            v.addEventListener("touchmove", e => {
+              if (!st) return; e.preventDefault();
+              if (e.touches.length === 2 && st.d) sc = Math.min(6, Math.max(1, st.sc * dist(e.touches) / st.d));
+              else if (e.touches.length === 1 && st.x != null && sc > 1) { tx = e.touches[0].clientX - st.x; ty = e.touches[0].clientY - st.y; }
+              ap();
+            }, { passive: false });
+            v.addEventListener("touchend", e => { if (!e.touches.length) { if (sc <= 1) { tx = ty = 0; ap(); } st = null; } });
+            v.querySelector(".vclose").onclick = () => window.closeViewer();
+            document.addEventListener("click", e => {
+              const i = e.target.closest("#preview img, .fitem img"); if (!i) return;
+              e.preventDefault(); e.stopPropagation(); window.openViewer(i.src);
+            }, true);
+          })();
+          // ---- 笔记库 ----
+          drawHist = function () {
+            const box = $("hist"); if (!box) return;
+            const q = ($("libQ") ? $("libQ").value.trim().toLowerCase() : "");
+            const h = loadHist(), dir = HAS_NATIVE ? Native.filesDir() : "";
+            box.innerHTML = ""; box.className = "";
+            if (!h.length) { box.innerHTML = '<div class="empty5"><i class="ic" data-fb="">menu_book</i><div>还没有笔记</div><div class="mute">在“生成”页粘贴 B 站链接，生成的笔记会保存在这里</div></div>'; iconFallback(box); return; }
+            const list = h.filter(it => !q || String(it.title || "").toLowerCase().includes(q));
+            if (!list.length) { box.innerHTML = '<div class="empty5"><i class="ic" data-fb="">search_off</i><div>没有找到相关笔记</div></div>'; iconFallback(box); return; }
+            list.forEach(it => {
+              let vers = 1;
+              if (it.mat && HAS_NATIVE) { try { const m = JSON.parse(Native.readText(it.mat) || "null"); if (m && m.vers) vers = m.vers.length; } catch (e) {} }
+              const d = document.createElement("div"); d.className = "nc";
+              const th = (it.imgs && it.imgs[0]) ? '<img class="th" loading="lazy" src="file://' + dir + '/img/' + it.imgs[0] + '">' : '<div class="th"><i class="ic" data-fb="">' + (it.kind === "sub" ? "subtitles" : "description") + '</i></div>';
+              d.innerHTML = th + '<div class="nb"><div class="nt"></div><div class="mute"></div></div><button class="icon nm"><i class="ic" data-fb="⋮">more_vert</i></button>';
+              d.querySelector(".nt").textContent = it.title;
+              d.querySelector(".mute").textContent = new Date(it.time).toLocaleString() + (it.kind === "sub" ? " · 字幕" : " · " + vers + " 个版本");
+              d.onclick = () => show(it);
+              const menu = e => {
+                e.preventDefault(); e.stopPropagation();
+                openMenu(d.querySelector(".nm"), [
+                  ["打开", "open_in_new", () => show(it)],
+                  ["导出图文 MD", "image", () => { show(it); setTimeout(() => $("v5md").click(), 150); }],
+                  ["删除", "delete", () => {
+                    if (!confirm("删除这篇笔记？")) return;
+                    localStorage.setItem("vtn_hist", JSON.stringify(loadHist().filter(x => x.time !== it.time)));
+                    drawHist(); snack("已删除");
+                  }]
+                ]);
+              };
+              d.querySelector(".nm").onclick = menu; d.oncontextmenu = menu;
+              box.appendChild(d);
+            });
+            iconFallback(box);
+          };
+          $("libQ").oninput = () => drawHist();
+          drawHist();
+          // ---- 返回键：面板/对话框 → AI 输入页 → 详情页 → 生成页 → 退出 ----
+          window.__back = function () {
+            if ($("viewer").classList.contains("show")) { window.closeViewer(); return true; }
+            if ($("dlg").classList.contains("show")) { closeDlg(); return true; }
+            if ($("pop").classList.contains("show")) { closePop(); return true; }
+            if ($("sheet").classList.contains("open")) { closeSheet(); return true; }
+            if ($("v4page").style.display === "block") { $("v4page").style.display = "none"; return true; }
+            if ($("pg-det").classList.contains("show")) { closeDet(); return true; }
+            const cur = document.querySelector(".page.on");
+            if (cur && cur.id !== "pg-gen") { tab("gen"); return true; }
+            return false;
+          };
+          iconFallback();
           </script>
           </body>
           </html>
@@ -2315,6 +2681,15 @@ jobs:
           cp -r package/dist/fonts app/src/main/assets/katex/
           rm -rf package katex.tgz
           ls app/src/main/assets/katex
+
+      - name: Fetch Material Symbols (from BeerCSS)
+        run: |
+          curl -fsSL https://registry.npmjs.org/beercss/-/beercss-5.0.3.tgz -o beer.tgz
+          tar xzf beer.tgz
+          mkdir -p app/src/main/assets/ms
+          cp package/dist/cdn/material-symbols-rounded.woff2 app/src/main/assets/ms/
+          rm -rf package beer.tgz
+          ls -l app/src/main/assets/ms
 
       - name: Build APK
         run: gradle assembleDebug --no-daemon

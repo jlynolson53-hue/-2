@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 9
-                  versionName "1.5.2"
+                  versionCode 10
+                  versionName "1.5.3"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -460,6 +460,14 @@ jobs:
           public class PdfPrint {
               public interface Done { void ok(File f); void fail(String m); default void step(String m) { } }
               private final PrintAttributes attrs;
+              static boolean endsWithEof(File f) {
+                  try {
+                      java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r");
+                      long n = r.length(); int k = (int) Math.min(64, n);
+                      byte[] b = new byte[k]; r.seek(n - k); r.readFully(b); r.close();
+                      return new String(b, "ISO-8859-1").contains("%%EOF");
+                  } catch (Exception e) { return false; }
+              }
               public PdfPrint(PrintAttributes a) { attrs = a; }
               public void print(final PrintDocumentAdapter ad, final File out, final Done cb) {
                   try { ad.onStart(); } catch (Exception ignored) { }
@@ -468,6 +476,7 @@ jobs:
                       @Override
                       public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
                           cb.step("2/3 排版完成，正在写入 PDF（" + (info == null ? "?" : String.valueOf(info.getPageCount())) + " 页）");
+                          final java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean(false);
                           try {
                               final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(out,
                                   ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE | ParcelFileDescriptor.MODE_READ_WRITE);
@@ -475,11 +484,25 @@ jobs:
                                   @Override
                                   public void onWriteFinished(PageRange[] pages) {
                                       try { pfd.close(); } catch (Exception ignored) { }
-                                      cb.ok(out);
+                                      if (!done.getAndSet(true)) cb.ok(out);
                                   }
                                   @Override
-                                  public void onWriteFailed(CharSequence e) { cb.fail(String.valueOf(e)); }
+                                  public void onWriteFailed(CharSequence e) { if (!done.getAndSet(true)) cb.fail(String.valueOf(e)); }
                               });
+                              new Thread(() -> {
+                                  long last = -1; int same = 0;
+                                  for (int t = 0; t < 120 && !done.get(); t++) {
+                                      try { Thread.sleep(1000); } catch (Exception ignored) { }
+                                      long len = out.length();
+                                      if (len > 0) cb.step("2/3 正在写入 PDF（已写 " + (len / 1024) + " KB）");
+                                      if (len > 0 && len == last) same++; else same = 0;
+                                      last = len;
+                                      if (same >= 3 && endsWithEof(out)) {
+                                          if (!done.getAndSet(true)) { try { pfd.close(); } catch (Exception ignored) { } cb.ok(out); }
+                                          return;
+                                      }
+                                  }
+                              }).start();
                           } catch (Exception e) { cb.fail(e.toString()); }
                       }
                       @Override
@@ -2265,13 +2288,13 @@ jobs:
               await fillPrint(curMd());
               const r = await Promise.race([
                 ncall("makePdf2", safeName(current.title) + verTag() + ".pdf"),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("TIMEOUT")), 40000))
+                new Promise((_, rej) => setTimeout(() => rej(new Error("TIMEOUT")), 90000))
               ]);
               $("v5msg").textContent = r.msg; alert(r.msg);
             } catch (e) {
               const to = e.message === "TIMEOUT";
               $("v5msg").textContent = "直接导出没成功（停在：" + lastStep + "）";
-              if (confirm((to ? "直接导出超过 40 秒没完成。" : "直接导出失败：" + e.message + "。") + "\n停在的步骤：" + lastStep +
+              if (confirm((to ? "直接导出超过 90 秒没完成。" : "直接导出失败：" + e.message + "。") + "\n停在的步骤：" + lastStep +
                 "\n\n点“确定”改用系统打印，在打印界面选“另存为 PDF”。\n（请把这条提示截图发给我，方便修复）")) {
                 await fillPrint(curMd());
                 Native.printPdf2(safeName(current.title) + verTag());

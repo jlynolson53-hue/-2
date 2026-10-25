@@ -89,6 +89,10 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
               <application
                   android:label="视频笔记"
                   android:icon="@mipmap/ic_launcher"
@@ -110,6 +114,7 @@ jobs:
                           <data android:mimeType="text/plain" />
                       </intent-filter>
                   </activity>
+                  <service android:name=".MainActivity$KeepService" android:exported="false" android:foregroundServiceType="dataSync" />
               </application>
           </manifest>
           VTN_EOF
@@ -503,6 +508,42 @@ jobs:
               private static final String HOME = "file:///android_asset/index.html";
               private String sharedText = "";
 
+              public static class KeepService extends android.app.Service {
+                  private android.os.PowerManager.WakeLock wl;
+                  @Override public android.os.IBinder onBind(Intent i) { return null; }
+                  @Override public int onStartCommand(Intent i, int flags, int startId) {
+                      String t = i != null ? i.getStringExtra("t") : null;
+                      if (t == null) t = "正在生成笔记";
+                      android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                      android.app.Notification.Builder nb;
+                      if (android.os.Build.VERSION.SDK_INT >= 26) {
+                          nm.createNotificationChannel(new android.app.NotificationChannel("work", "后台生成", android.app.NotificationManager.IMPORTANCE_LOW));
+                          nb = new android.app.Notification.Builder(this, "work");
+                      } else nb = new android.app.Notification.Builder(this);
+                      Intent open = new Intent(this, MainActivity.class);
+                      open.setAction(Intent.ACTION_MAIN);
+                      open.addCategory(Intent.CATEGORY_LAUNCHER);
+                      android.app.PendingIntent pi = android.app.PendingIntent.getActivity(this, 0, open,
+                          android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+                      nb.setSmallIcon(getApplicationInfo().icon).setContentTitle("视频笔记").setContentText(t + "，可以切到后台")
+                        .setOngoing(true).setContentIntent(pi);
+                      if (android.os.Build.VERSION.SDK_INT >= 29)
+                          startForeground(1, nb.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                      else startForeground(1, nb.build());
+                      if (wl == null) {
+                          android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+                          wl = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "vtn:work");
+                          wl.acquire(3L * 60 * 60 * 1000);
+                      }
+                      return START_NOT_STICKY;
+                  }
+                  @Override public void onDestroy() {
+                      if (wl != null && wl.isHeld()) wl.release();
+                      wl = null;
+                      super.onDestroy();
+                  }
+              }
+
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
@@ -532,8 +573,12 @@ jobs:
               @Override
               protected void onNewIntent(Intent i) {
                   super.onNewIntent(i);
+                  setIntent(i);
+                  if (i == null || !Intent.ACTION_SEND.equals(i.getAction())) return;
                   readShare(i);
-                  web.loadUrl(HOME);
+                  web.evaluateJavascript("window.__busy?'1':'0'", v -> {
+                      if (v == null || !v.contains("1")) web.loadUrl(HOME);
+                  });
               }
 
               private void readShare(Intent i) {
@@ -689,6 +734,27 @@ jobs:
                       runOnUiThread(() -> {
                           CookieManager.getInstance().removeAllCookies(null);
                           CookieManager.getInstance().flush();
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void bgStart(final String t) {
+                      runOnUiThread(() -> {
+                          try {
+                              if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                                      != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                                  requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
+                              Intent i = new Intent(MainActivity.this, KeepService.class);
+                              i.putExtra("t", t);
+                              if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+                          } catch (Exception ignored) { }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void bgStop() {
+                      runOnUiThread(() -> {
+                          try { stopService(new Intent(MainActivity.this, KeepService.class)); } catch (Exception ignored) { }
                       });
                   }
 
@@ -1087,7 +1153,7 @@ jobs:
           details>summary::after{content:"expand_more";font-family:"Material Symbols Rounded";font-size:24px;margin-left:auto;transition:transform .2s;color:var(--on-surface-variant)}
           details[open]>summary::after{transform:rotate(180deg)}
           .req{margin:8px 0;padding:4px 16px;border-radius:12px;background:var(--surface-container)}
-          .req summary{display:flex;align-items:center;gap:4px}.req .rsw{margin-left:auto;padding:6px 8px 6px 0}.req.off textarea,.req.off .pills{opacity:.45}.req em.no{color:var(--on-surface-variant)}
+          .req summary{display:flex;align-items:center;gap:4px}.req .rsw{margin-left:12px;padding:6px 8px 6px 0}.req.off textarea,.req.off .pills{opacity:.45}.req em.no{color:var(--on-surface-variant)}
           .req em{font-style:normal;font-size:12px;color:var(--primary);margin-left:4px}
           .chips,.pills{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
           .chip5,.pills button{display:inline-flex;align-items:center;gap:6px;height:32px;min-height:32px;padding:0 16px;margin:0;border-radius:8px;border:1px solid var(--outline);background:transparent;color:var(--on-surface-variant);font-size:14px}
@@ -1448,6 +1514,13 @@ jobs:
               STYLE[$("style").value] +
               "要求：1）每个小节标题或要点后面标注对应的开始时间，格式严格为 [mm:ss] 或 [h:mm:ss]；2）只根据字幕内容整理，不要编造；3）字幕是自动识别的，可能有错别字，请按上下文修正；4）不要输出多余的开场白。";
           }
+          async function pool(n, items, fn) {
+            const out = new Array(items.length); let k = 0;
+            await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+              while (k < items.length) { const i = k++; out[i] = await fn(items[i], i); }
+            }));
+            return out;
+          }
           async function makeNotes(title, segs) {
             const lines = toLines(segs);
             const chunks = []; let buf = "";
@@ -1457,12 +1530,13 @@ jobs:
               log("正在请大模型写笔记（可能需要半分钟到两分钟）…");
               return await chat([{ role: "system", content: sysPrompt() }, { role: "user", content: "视频标题：" + title + "\n\n字幕：\n" + chunks[0] }]);
             }
-            const parts = [];
-            for (let i = 0; i < chunks.length; i++) {
-              log("视频较长，分段处理：第 " + (i + 1) + "/" + chunks.length + " 段…");
-              parts.push(await chat([{ role: "system", content: sysPrompt() + "这是长视频的其中一段，只整理这一段，不要写全片总结，用二级标题 ## 开头。" },
-                { role: "user", content: "视频标题：" + title + "\n第 " + (i + 1) + "/" + chunks.length + " 段字幕：\n" + chunks[i] }]));
-            }
+            log("视频较长，分 " + chunks.length + " 段同时处理…");
+            const parts = await pool(3, chunks, async (c, i) => {
+              const r = await chat([{ role: "system", content: sysPrompt() + "这是长视频的其中一段，只整理这一段，不要写全片总结，用二级标题 ## 开头。" },
+                { role: "user", content: "视频标题：" + title + "\n第 " + (i + 1) + "/" + chunks.length + " 段字幕：\n" + chunks[i] }]);
+              log("第 " + (i + 1) + "/" + chunks.length + " 段完成");
+              return r;
+            });
             log("正在生成全片概要…");
             const joined = parts.join("\n\n");
             const sum = await chat([{ role: "user", content: "下面是一个视频的分段笔记，请用简体中文写一个“## 全片概要”小节（3-6句话加最多8条要点），只输出这个小节：\n\n" + joined.slice(0, 60000) }]);
@@ -1805,21 +1879,22 @@ jobs:
             } catch (e) { return []; }
           }
           async function readFrames(frames) {
-            for (let i = 0; i < frames.length; i += 4) {
+            const starts = []; for (let i = 0; i < frames.length; i += 4) starts.push(i);
+            await pool(3, starts, async i => {
               const b = frames.slice(i, i + 4);
               log("识图 " + (i + 1) + "-" + (i + b.length) + " / " + frames.length + " …");
               const content = [{ type: "text", text: VPROMPT + "\n本批图片编号依次为：" + b.map((f, j) => "图" + (i + j + 1)).join("、") }];
               b.forEach(f => content.push({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + Native.readB64(f.name) } }));
               let txt;
               try { txt = await chat([{ role: "user", content }]); }
-              catch (e) { if (i === 0) throw e; log("这一批识图失败，跳过：" + e.message, "e"); continue; }
+              catch (e) { if (i === 0) throw e; log("这一批识图失败，跳过：" + e.message, "e"); return; }
               const arr = parseJsonArr(txt);
               b.forEach((f, j) => {
                 const n = i + j + 1;
                 const o = arr.find(x => Number(x.n) === n) || arr[j] || {};
                 f.n = n; f.type = String(o.type || "其他"); f.content = String(o.content || "").trim();
               });
-            }
+            });
             return frames.filter(f => f.n && f.type !== "无关");
           }
           let FRAME_MODE = false;
@@ -2390,6 +2465,16 @@ jobs:
                 $("logBox").open = true;
               }
             }
+          };
+          $("goBtn").onclick = () => run(false);
+          $("subOnly").onclick = () => run(true);
+          // ---- 后台保活：生成期间开前台服务，切到后台也继续 ----
+          const _runBg = run;
+          run = async function (s) {
+            window.__busy = true;
+            try { if (HAS_NATIVE && Native.bgStart) Native.bgStart(s ? "正在提取字幕" : "正在生成笔记"); } catch (e) {}
+            try { return await _runBg(s); }
+            finally { window.__busy = false; try { if (HAS_NATIVE && Native.bgStop) Native.bgStop(); } catch (e) {} }
           };
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);

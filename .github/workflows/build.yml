@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 8
-                  versionName "1.5.1"
+                  versionCode 9
+                  versionName "1.5.2"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -458,13 +458,16 @@ jobs:
           import java.io.File;
 
           public class PdfPrint {
-              public interface Done { void ok(File f); void fail(String m); }
+              public interface Done { void ok(File f); void fail(String m); default void step(String m) { } }
               private final PrintAttributes attrs;
               public PdfPrint(PrintAttributes a) { attrs = a; }
               public void print(final PrintDocumentAdapter ad, final File out, final Done cb) {
-                  ad.onLayout(null, attrs, null, new PrintDocumentAdapter.LayoutResultCallback() {
+                  try { ad.onStart(); } catch (Exception ignored) { }
+                  cb.step("1/3 开始排版");
+                  ad.onLayout(null, attrs, new CancellationSignal(), new PrintDocumentAdapter.LayoutResultCallback() {
                       @Override
                       public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
+                          cb.step("2/3 排版完成，正在写入 PDF（" + (info == null ? "?" : String.valueOf(info.getPageCount())) + " 页）");
                           try {
                               final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(out,
                                   ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE | ParcelFileDescriptor.MODE_READ_WRITE);
@@ -910,8 +913,9 @@ jobs:
                                   .build();
                               final File out = new File(getCacheDir(), "note_export.pdf");
                               new PdfPrint(a).print(web.createPrintDocumentAdapter(name), out, new PdfPrint.Done() {
+                                  public void step(String m) { prog(id, m); }
                                   public void ok(final File f) {
-                                      prog(id, "PDF 已生成，正在保存…");
+                                      prog(id, "3/3 PDF 已生成，正在保存…");
                                       new Thread(() -> {
                                           JSONObject r = new JSONObject();
                                           try { r.put("msg", saveBytes(name, readFile(f), "application/pdf")); }
@@ -2250,6 +2254,29 @@ jobs:
             await fillPrint(curMd());
             Native.printPdf2(safeName(current.title) + verTag());
             $("v5msg").textContent = "";
+          };
+          // ===== v1.5.2：PDF 导出显示步骤，超时自动改用系统打印 =====
+          $("v5pdf").onclick = async () => {
+            if (!current || !HAS_NATIVE) return;
+            const b = $("v5pdf"); b.disabled = true; $("v5msg").textContent = "正在准备图片和公式…";
+            const old = window.__nativeProg; let lastStep = "还没开始排版";
+            window.__nativeProg = (id, msg) => { lastStep = msg; $("v5msg").textContent = msg; log("PDF：" + msg); };
+            try {
+              await fillPrint(curMd());
+              const r = await Promise.race([
+                ncall("makePdf2", safeName(current.title) + verTag() + ".pdf"),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("TIMEOUT")), 40000))
+              ]);
+              $("v5msg").textContent = r.msg; alert(r.msg);
+            } catch (e) {
+              const to = e.message === "TIMEOUT";
+              $("v5msg").textContent = "直接导出没成功（停在：" + lastStep + "）";
+              if (confirm((to ? "直接导出超过 40 秒没完成。" : "直接导出失败：" + e.message + "。") + "\n停在的步骤：" + lastStep +
+                "\n\n点“确定”改用系统打印，在打印界面选“另存为 PDF”。\n（请把这条提示截图发给我，方便修复）")) {
+                await fillPrint(curMd());
+                Native.printPdf2(safeName(current.title) + verTag());
+              }
+            } finally { window.__nativeProg = old; b.disabled = false; }
           };
           </script>
           </body>

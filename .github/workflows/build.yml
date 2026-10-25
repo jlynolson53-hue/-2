@@ -23,6 +23,17 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Ensure fixed signing key
+        run: |
+          if [ ! -f vtn.jks ]; then
+            keytool -genkeypair -keystore vtn.jks -storepass vtn123456 -keypass vtn123456 -alias vtn -keyalg RSA -keysize 2048 -validity 20000 -dname "CN=VideoNote"
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add vtn.jks
+            git commit -m "add fixed signing key"
+            git push
+          fi
+
       - name: Write project files
         run: |
           cat > settings.gradle <<'VTN_EOF'
@@ -51,13 +62,21 @@ jobs:
           }
           android {
               namespace 'com.vtn.lite'
+              signingConfigs {
+                  debug {
+                      storeFile file('../vtn.jks')
+                      storePassword 'vtn123456'
+                      keyAlias 'vtn'
+                      keyPassword 'vtn123456'
+                  }
+              }
               compileSdk 34
               defaultConfig {
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 2
+                  versionName "1.1"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -705,6 +724,12 @@ jobs:
           button:disabled{opacity:.5}
           .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
           .mute{color:var(--mute);font-size:14px}
+          .req{margin-top:14px;border:1px dashed var(--pri);border-radius:12px;padding:10px 12px;background:var(--pri2)}
+          .req summary{cursor:pointer;font-weight:600;color:var(--pri)}
+          .req summary em{font-style:normal;font-weight:400;font-size:13px;margin-left:6px;color:var(--ok)}
+          .req textarea{min-height:110px;margin-top:8px;background:var(--card)}
+          .pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+          .pills button{margin:0;padding:6px 12px;font-size:14px;border-radius:99px;background:var(--card);color:var(--fg);border:1px solid var(--bd)}
           #log{white-space:pre-wrap;font-size:14px;color:var(--mute);max-height:180px;overflow:auto;margin-top:12px;background:var(--bg);border-radius:10px}
           #log:not(:empty){padding:10px 12px}
           #log .e{color:var(--err)}#log .o{color:var(--ok)}
@@ -734,7 +759,7 @@ jobs:
           .nav button{flex:0 1 180px;background:transparent;color:var(--mute);margin:0;border-radius:0;padding:8px 0 10px;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:2px}
           .nav button span{font-size:22px;line-height:1}
           .nav button.on{color:var(--pri);font-weight:600}
-          @media (min-width:1100px){#pg-gen.on{display:grid;grid-template-columns:400px 1fr;gap:16px;align-items:start}#pg-gen .side{position:sticky;top:76px}}
+          @media (min-width:1100px){#pg-gen.on{display:grid;grid-template-columns:420px 1fr;gap:16px;align-items:start}#pg-gen .side{position:sticky;top:76px}}
           </style>
           </head>
           <body>
@@ -756,6 +781,17 @@ jobs:
                     <option value="detail">详细逐段</option>
                   </select></div>
               </div>
+              <details class="req" id="reqBox">
+                <summary>我的要求<em id="reqOn"></em></summary>
+                <textarea id="req" placeholder="写下你对这篇笔记的要求，例如：&#10;这是高三物理复习课，重点整理解题方法；&#10;每个知识点后面列出易错点；&#10;最后出3道自测题。"></textarea>
+                <div class="pills" id="pills">
+                  <button>标出高考考点</button><button>列出易错点</button><button>例题写完整解题步骤</button>
+                  <button>保留老师的口诀和技巧</button><button>相似概念用表格对比</button><button>末尾出3道自测题（附答案）</button>
+                  <button>语言尽量简洁</button>
+                </div>
+                <button class="sec" id="reqClear">清空</button>
+                <div class="mute" style="margin-top:6px">点上面的标签可以快速添加。内容会自动保存，以后每次生成都会用上。</div>
+              </details>
               <button id="goBtn" class="big">开始生成</button><button class="sec" id="subOnly">只提取字幕</button>
               <div class="busy" id="busy"><i></i></div>
               <div id="log"></div>
@@ -1093,6 +1129,28 @@ jobs:
             if (p === "set") refreshLogin();
           }
           document.querySelectorAll(".nav button").forEach(b => b.onclick = () => tab(b.dataset.p));
+          // ---- 我的要求 ----
+          $("req").value = localStorage.getItem("vtn_req") || "";
+          function reqMark() { const on = $("req").value.trim().length > 0; $("reqOn").textContent = on ? "已启用" : ""; }
+          function reqSave() { localStorage.setItem("vtn_req", $("req").value); reqMark(); }
+          $("req").addEventListener("input", reqSave);
+          if ($("req").value.trim()) $("reqBox").open = true;
+          reqMark();
+          document.querySelectorAll("#pills button").forEach(b => b.onclick = () => {
+            const t = b.textContent; const v = $("req").value;
+            if (v.includes(t)) return;
+            $("req").value = (v.trim() ? v.replace(/\s+$/, "") + "\n" : "") + t;
+            reqSave();
+          });
+          $("reqClear").onclick = () => { if (confirm("清空所有要求？")) { $("req").value = ""; reqSave(); } };
+          const _sp = sysPrompt;
+          sysPrompt = function () {
+            const r = $("req").value.trim();
+            if (!r) return _sp();
+            return _sp() + "\n\n【用户的额外要求，请尽量满足】\n" + r +
+              "\n（注意：额外要求不能违背“只根据字幕内容整理、不编造”和“标注时间戳”这两条规则；如果要求出自测题或补充例题，请明确标注“【补充】”，与视频原内容区分开。）";
+          };
+          // ---- 其它 ----
           const _show = show;
           show = function (item) { tab("gen"); $("hint").style.display = "none"; _show(item); };
           const _run = run;

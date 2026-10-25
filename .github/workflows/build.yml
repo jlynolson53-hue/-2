@@ -1087,6 +1087,7 @@ jobs:
           details>summary::after{content:"expand_more";font-family:"Material Symbols Rounded";font-size:24px;margin-left:auto;transition:transform .2s;color:var(--on-surface-variant)}
           details[open]>summary::after{transform:rotate(180deg)}
           .req{margin:8px 0;padding:4px 16px;border-radius:12px;background:var(--surface-container)}
+          .req summary{display:flex;align-items:center;gap:4px}.req .rsw{margin-left:auto;padding:6px 8px 6px 0}.req.off textarea,.req.off .pills{opacity:.45}.req em.no{color:var(--on-surface-variant)}
           .req em{font-style:normal;font-size:12px;color:var(--primary);margin-left:4px}
           .chips,.pills{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
           .chip5,.pills button{display:inline-flex;align-items:center;gap:6px;height:32px;min-height:32px;padding:0 16px;margin:0;border-radius:8px;border:1px solid var(--outline);background:transparent;color:var(--on-surface-variant);font-size:14px}
@@ -1204,7 +1205,7 @@ jobs:
               <label>选项</label><div class="chips"><button class="chip5" id="chipTs">显示时间戳</button><button class="chip5" id="chipShot">截图笔记</button></div>
               <label class="sw" style="display:none"><span>笔记中显示时间戳<small id="tsTip"></small></span><input type="checkbox" id="tsOn"><i></i></label>
               <details class="req" id="reqBox">
-                <summary>我的要求<em id="reqOn"></em></summary>
+                <summary>我的要求<em id="reqOn"></em><label class="sw rsw" id="reqSw" title="启用/关闭我的要求"><input type="checkbox" id="reqEn"><i></i></label></summary>
                 <textarea id="req" placeholder="例如：这是高三物理复习课，重点整理解题方法；每个知识点后面列出易错点；最后出3道自测题。"></textarea>
                 <div class="pills" id="pills">
                   <button>标出高考考点</button><button>列出易错点</button><button>例题写完整解题步骤</button>
@@ -1600,7 +1601,10 @@ jobs:
           };
           // ---- 我的要求 ----
           $("req").value = localStorage.getItem("vtn_req") || "";
-          function reqMark() { $("reqOn").textContent = $("req").value.trim() ? "已启用" : ""; }
+          let REQ_ON = localStorage.getItem("vtn_req_on") !== "0";
+          $("reqEn").checked = REQ_ON;
+          $("reqSw").addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); REQ_ON = !REQ_ON; $("reqEn").checked = REQ_ON; localStorage.setItem("vtn_req_on", REQ_ON ? "1" : "0"); reqMark(); });
+          function reqMark() { const has = !!$("req").value.trim(); $("reqOn").textContent = !has ? "" : (REQ_ON ? "已启用" : "未启用"); $("reqOn").className = REQ_ON ? "" : "no"; $("reqBox").classList.toggle("off", !REQ_ON); }
           function reqSave() { localStorage.setItem("vtn_req", $("req").value); reqMark(); }
           $("req").addEventListener("input", reqSave);
           if ($("req").value.trim()) $("reqBox").open = true;
@@ -1617,7 +1621,7 @@ jobs:
             const ts = $("tsOn").checked;
             let p = _sp();
             if (!ts) p = p.replace(/1）[^；]*时间[^；]*；/, "1）不要在笔记里标注任何时间戳或 [mm:ss] 形式的时间；") + "\n特别注意：字幕里的 [分:秒] 只是给你定位用的，笔记正文中一律不要出现时间。";
-            const r = $("req").value.trim();
+            const r = REQ_ON ? $("req").value.trim() : "";
             if (!r) return p;
             return p + "\n\n【用户的额外要求，请尽量满足】\n" + r +
               "\n（注意：额外要求不能违背“只根据字幕内容整理、不编造”" + (ts ? "和“标注时间戳”" : "") + "的规则；如果要求出自测题或补充例题，请明确标注“【补充】”，与视频原内容区分开。）";
@@ -2018,7 +2022,7 @@ jobs:
               if (!subOnly) {
                 item.mat = matName(item);
                 saveMat(item.mat, {
-                  title: v.title, bvid: v.bvid, p: v.p, asr: !!v.asr, style: $("style").value, req: $("req").value.trim(), ts: $("tsOn").checked,
+                  title: v.title, bvid: v.bvid, p: v.p, asr: !!v.asr, style: $("style").value, req: REQ_ON ? $("req").value.trim() : "", ts: $("tsOn").checked,
                   sys, segs: v.segs.map(s => ({ from: s.from, to: s.to, text: s.text })),
                   frames: frames.map(f => ({ n: f.n, t: f.t, type: f.type, content: f.content, name: f.name })),
                   calls: CAP, vers: [{ md, note: "首次生成", time }], cur: 0

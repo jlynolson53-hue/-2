@@ -544,8 +544,6 @@ jobs:
               }
 
               @Override
-
-              @Override
               public void onBackPressed() {
                   String u = web.getUrl();
                   if (u != null && !u.startsWith("file:")) {

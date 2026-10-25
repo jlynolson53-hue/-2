@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 12
-                  versionName "1.5.5"
+                  versionCode 13
+                  versionName "1.5.6"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -1384,7 +1384,8 @@ jobs:
               <label>接口地址（OpenAI 兼容）</label><input id="base" placeholder="https://api.deepseek.com">
               <label>模型名</label><input id="model" placeholder="deepseek-flash">
               <label>API Key</label><div class="pw"><input id="key" type="password" placeholder="sk-..."><button class="icon eye" data-for="key"><i class="ic" data-fb="显示">visibility</i></button></div>
-              <button id="saveSet">保存设置</button><button class="sec" id="testSet">测试连接</button>
+              <button id="saveSet">保存设置</button><button class="sec" id="testSet">测试连接</button><button class="sec" id="balBtn">查询余额</button>
+              <p class="mute" id="balTxt"></p>
               <p class="mute">Key 只保存在本机，不会上传到别处。</p>
             </div>
             <div class="gt">截图识图 / 语音转写</div>
@@ -1402,7 +1403,7 @@ jobs:
               <label>主题色</label><div class="chips" id="seedChips"></div>
             </div>
             <div class="gt">关于</div>
-            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.5</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
+            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.6</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
           </div></div>
 
           <div id="pg-det">
@@ -1863,7 +1864,8 @@ jobs:
           const V3 = {
             shot: localStorage.getItem("vtn_shot") !== "0",
             gap: parseInt(localStorage.getItem("vtn_gap") || "60"),
-            sf: localStorage.getItem("vtn_sf") || ""
+            sf: localStorage.getItem("vtn_sf") || "",
+            vm: localStorage.getItem("vtn_vm") || "Qwen/Qwen2.5-VL-72B-Instruct"
           };
           (function () {
             const st = document.createElement("style");
@@ -1878,11 +1880,15 @@ jobs:
               '<p class="mute">截图会让笔记更完整，但更慢、费用更高。每个视频最多保留约 30 张。</p>' +
               '<label>硅基流动 API Key（视频没有字幕时，用它把语音转成文字）</label>' +
               '<input id="sfKey" type="password" placeholder="sk-...">' +
-              '<p class="mute" id="sfTip"></p>';
+              '<p class="mute" id="sfTip"></p>' +
+              '<label>识图模型（硅基流动，必须支持看图）</label><input id="vmName" placeholder="Qwen/Qwen2.5-VL-72B-Instruct">' +
+              '<p class="mute">填了硅基流动 Key 时，截图交给这个模型识别；没填时用上面的大模型，它如果不支持看图，识图会全部失败。</p>';
             ($("pg-set") || document.body).appendChild(box);
             $("shotOn").checked = V3.shot;
             $("shotGap").value = String(V3.gap);
             $("sfKey").value = V3.sf;
+            $("vmName").value = V3.vm;
+            $("vmName").oninput = () => { V3.vm = $("vmName").value.trim() || "Qwen/Qwen2.5-VL-72B-Instruct"; localStorage.setItem("vtn_vm", V3.vm); };
             const tip = () => { $("sfTip").textContent = V3.sf ? "已填写：没字幕的视频会自动转写" : "未填写：没字幕的视频无法生成笔记"; };
             tip();
             $("shotOn").onchange = () => { V3.shot = $("shotOn").checked; localStorage.setItem("vtn_shot", V3.shot ? "1" : "0"); };
@@ -1988,6 +1994,19 @@ jobs:
               return Array.isArray(a) ? a.map(o => Object.assign({}, o, { content: String(o.content || "").replace(/\\n(?![a-zA-Z])/g, "\n") })) : [];
             } catch (e) { return []; }
           }
+          async function vchat(content) {
+            if (!V3.sf) return await chat([{ role: "user", content }]);
+            const r = await http("POST", "https://api.siliconflow.cn/v1/chat/completions",
+              { "Content-Type": "application/json", "Authorization": "Bearer " + V3.sf },
+              JSON.stringify({ model: V3.vm, messages: [{ role: "user", content }], temperature: 0.2 }));
+            let j = null; try { j = JSON.parse(r.body); } catch (e) {}
+            if (r.status !== 200 || !j || !j.choices) {
+              const m = (j && (j.message || (j.error && j.error.message))) || String(r.body || "").slice(0, 200);
+              const tip = { 401: "硅基流动 Key 不对", 402: "硅基流动余额不足", 403: "硅基流动余额不足或无权限", 429: "识图请求太频繁" }[r.status] || "识图模型请求失败";
+              throw new Error(tip + "（状态码 " + r.status + "，模型 " + V3.vm + "）：" + m);
+            }
+            return j.choices[0].message.content;
+          }
           async function readFrames(frames) {
             const starts = []; for (let i = 0; i < frames.length; i += 4) starts.push(i);
             await pool(3, starts, async i => {
@@ -1996,9 +2015,10 @@ jobs:
               const content = [{ type: "text", text: VPROMPT + "\n本批图片编号依次为：" + b.map((f, j) => "图" + (i + j + 1)).join("、") }];
               b.forEach(f => content.push({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + Native.readB64(f.name) } }));
               let txt;
-              try { txt = await chat([{ role: "user", content }]); }
+              try { txt = await vchat(content); }
               catch (e) { if (i === 0) throw e; log("这一批识图失败，跳过：" + e.message, "e"); return; }
               const arr = parseJsonArr(txt);
+              if (!arr.length) log("识图 " + (i + 1) + "-" + (i + b.length) + " 没返回可用结果，模型回复开头：" + String(txt || "").replace(/\s+/g, " ").slice(0, 80), "e");
               b.forEach((f, j) => {
                 const n = i + j + 1;
                 const o = arr.find(x => Number(x.n) === n) || arr[j] || {};
@@ -2141,7 +2161,11 @@ jobs:
           const _rf4 = readFrames;
           readFrames = async function (frames) {
             const r = await _rf4(frames);
-            const ok = r.filter(f => GOOD.has(f.type) && f.content && !(f.t < 15 && f.type !== "题目"));
+            let ok = r.filter(f => GOOD.has(f.type) && f.content && !(f.t < 15 && f.type !== "题目"));
+            if (!ok.length && frames.length) {
+              log("识图一张都没认出来，已改为保留全部截图（按板书处理），笔记里照样插图；请检查识图模型设置", "e");
+              ok = frames.filter(f => f.n).map(f => Object.assign(f, { type: GOOD.has(f.type) ? f.type : "板书", content: f.content || "（这张截图没有识别出文字）" }));
+            }
             log("识图后保留 " + ok.length + " 张（已去掉片头、人像、动画等无关画面）");
             return ok;
           };
@@ -2697,6 +2721,30 @@ jobs:
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);
           setTimeout(showResume, 300);
+          // ===== v1.5.6：查询余额 =====
+          $("balBtn").onclick = async () => {
+            const out = []; $("balTxt").textContent = "查询中…";
+            const base = String(S.base || "").replace(/\/+$/, "");
+            if (!S.key) out.push("大模型：没填 API Key");
+            else if (/deepseek\.com/.test(base)) {
+              try {
+                const r = await http("GET", base + "/user/balance", { "Authorization": "Bearer " + S.key }, "");
+                const j = JSON.parse(r.body);
+                const b = (j.balance_infos || []).map(x => x.total_balance + " " + (x.currency === "CNY" ? "元" : x.currency)).join("，");
+                out.push("DeepSeek 余额：" + (b || "查不到") + (j.is_available === false ? "（余额不足，不能调用）" : ""));
+              } catch (e) { out.push("DeepSeek 查询失败：" + e.message); }
+            } else if (/siliconflow\.cn/.test(base)) out.push("大模型用的是硅基流动，见下一行");
+            else out.push("大模型：这个接口地址不支持查询余额");
+            const sk = V3.sf || (/siliconflow\.cn/.test(base) ? S.key : "");
+            if (sk) {
+              try {
+                const r = await http("GET", "https://api.siliconflow.cn/v1/user/info", { "Authorization": "Bearer " + sk }, "");
+                const d = (JSON.parse(r.body) || {}).data || {};
+                out.push("硅基流动余额：" + (d.totalBalance != null ? d.totalBalance : (d.balance != null ? d.balance : "查不到")) + " 元");
+              } catch (e) { out.push("硅基流动查询失败：" + e.message); }
+            }
+            $("balTxt").textContent = out.join("\n"); $("balTxt").style.whiteSpace = "pre-line";
+          };
           // ---- 笔记详情页 ----
           function openDet() { const d = $("pg-det"); if (!d.classList.contains("show")) { d.classList.add("show"); d.scrollTop = 0; } }
           function closeDet() { closeSheet(); $("pg-det").classList.remove("show"); }

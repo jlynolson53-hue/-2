@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 4
-                  versionName "1.3"
+                  versionCode 5
+                  versionName "1.4"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -751,6 +751,25 @@ jobs:
                   }
 
                   @JavascriptInterface
+                  public String writeText(String name, String text) {
+                      try {
+                          File d = new File(getFilesDir(), "mat"); d.mkdirs();
+                          FileOutputStream o = new FileOutputStream(new File(d, name.replaceAll("[\\\\/]", "_")));
+                          o.write(text.getBytes(StandardCharsets.UTF_8)); o.close();
+                          return "ok";
+                      } catch (Exception e) { return "err:" + e.getMessage(); }
+                  }
+
+                  @JavascriptInterface
+                  public String readText(String name) {
+                      try {
+                          File f = new File(new File(getFilesDir(), "mat"), name.replaceAll("[\\\\/]", "_"));
+                          if (!f.exists()) return "";
+                          return new String(readFile(f), StandardCharsets.UTF_8);
+                      } catch (Exception e) { return ""; }
+                  }
+
+                  @JavascriptInterface
                   public String filesDir() {
                       return getFilesDir().getAbsolutePath();
                   }
@@ -1044,6 +1063,8 @@ jobs:
           <script>
           (function(){var m=localStorage.getItem("vtn_theme")||"auto";var d=m==="dark"||(m==="auto"&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";})();
           </script>
+          <link rel="stylesheet" href="katex/katex.min.css">
+          <script src="katex/katex.min.js"></script>
           </head>
           <body>
           <div class="top"><div class="logo">&#9654;</div><b>视频笔记</b><span class="sp"></span>
@@ -1737,10 +1758,222 @@ jobs:
           run = async function (s) { $("busy").style.display = "block"; try { await runV3(s); } finally { $("busy").style.display = "none"; } };
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);
+          // ===== v1.4：公式渲染 + 过滤无关截图 + AI 输入 + 多轮修改 =====
+          // ---- 1. 公式 ----
+          function cleanMd(md) {
+            return String(md || "").split("\n").filter(l => !/^\s*(\${1,2}|\\\\)\s*$/.test(l)).join("\n").replace(/\n{3,}/g, "\n\n");
+          }
+          function texHtml(tex, disp) {
+            try { if (window.katex) return katex.renderToString(tex, { displayMode: disp, throwOnError: false, strict: false }); } catch (e) {}
+            return '<code>' + esc(tex) + '</code>';
+          }
+          const _render4 = render;
+          render = function (md) {
+            const M = [];
+            const put = (tex, disp) => { M.push([tex.trim(), disp]); return "\u0002" + (M.length - 1) + "\u0003"; };
+            md = String(md || "");
+            md = md.replace(/\$\$([\s\S]+?)\$\$/g, (m, t) => "\n\n" + put(t, true) + "\n\n");
+            md = md.replace(/\\\[([\s\S]+?)\\\]/g, (m, t) => "\n\n" + put(t, true) + "\n\n");
+            md = md.replace(/\\\(([\s\S]+?)\\\)/g, (m, t) => put(t, false));
+            md = md.replace(/\$([^\$\n]+?)\$/g, (m, t) => put(t, false));
+            md = cleanMd(md);
+            let h = _render4(md);
+            h = h.replace(/<p>\s*\u0002(\d+)\u0003\s*<\/p>/g, (m, i) => '<div class="mathd">' + texHtml(M[i][0], true) + '</div>');
+            h = h.replace(/\u0002(\d+)\u0003/g, (m, i) => texHtml(M[i][0], M[i][1]));
+            return h;
+          };
+          (function () {
+            const st = document.createElement("style");
+            st.textContent = ".mathd{overflow-x:auto;margin:10px 0}.katex{font-size:1.08em}" +
+              ".v4bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}.v4bar select{width:auto;flex:1;min-width:140px;margin:0}.v4bar button{margin:0}" +
+              "#v4page{position:fixed;inset:0;z-index:999;background:var(--bg,#fff);overflow:auto;padding:14px;display:none}" +
+              "#v4page h3{margin:16px 0 6px}#v4page pre{white-space:pre-wrap;word-break:break-all;font-size:13px;background:rgba(127,127,127,.12);padding:10px;border-radius:8px}" +
+              "#v4page img{max-width:100%;border-radius:8px;border:1px solid var(--bd)}.v4top{position:sticky;top:0;display:flex;justify-content:space-between;align-items:center;background:inherit;padding-bottom:8px}";
+            document.head.appendChild(st);
+          })();
+
+          // ---- 2. 过滤无关截图 ----
+          const GOOD = new Set(["题目", "板书", "图表"]);
+          const _rf4 = readFrames;
+          readFrames = async function (frames) {
+            const r = await _rf4(frames);
+            const ok = r.filter(f => GOOD.has(f.type) && f.content && !(f.t < 15 && f.type !== "题目"));
+            log("识图后保留 " + ok.length + " 张（已去掉片头、人像、动画等无关画面）");
+            return ok;
+          };
+          const _ins4 = insertImages;
+          insertImages = function (md, frames) { return _ins4(md, (frames || []).filter(f => GOOD.has(f.type))); };
+
+          // ---- 3. 记录发给 AI 的真实请求 ----
+          let CAP = null;
+          const _chat4 = chat;
+          chat = async function (messages) {
+            if (CAP) CAP.push(messages.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content :
+              m.content.map(c => c.type === "text" ? c.text : "[图片]").join("\n") })));
+            return await _chat4.apply(this, arguments);
+          };
+          const matName = it => "mat_" + it.time + ".json";
+          function loadMat(it) { if (!it || !it.mat || !HAS_NATIVE) return null; try { return JSON.parse(Native.readText(it.mat) || "null"); } catch (e) { return null; } }
+          function saveMat(name, m) { if (HAS_NATIVE) Native.writeText(name, JSON.stringify(m)); }
+          function updHist(item) {
+            const h = loadHist(); const i = h.findIndex(x => x.time === item.time);
+            if (i >= 0) h[i] = item; else h.unshift(item);
+            try { localStorage.setItem("vtn_hist", JSON.stringify(h)); } catch (e) {}
+            drawHist();
+          }
+          function framesText(segs, frames) {
+            const all = frames.length ? segs.concat(frames.map(f => ({ from: f.t, to: f.t, text: "【图" + f.n + "】（" + f.type + "）" + String(f.content).replace(/\s*\n\s*/g, " / ") }))).sort((a, b) => a.from - b.from) : segs;
+            return toLines(all).join("\n");
+          }
+
+          // ---- 4. 新的生成流程（保存材料）----
+          async function runV4(subOnly) {
+            $("log").innerHTML = "";
+            $("goBtn").disabled = $("subOnly").disabled = true;
+            try {
+              const info = await parseInput($("input").value.trim());
+              const v = await fetchSubs2(info);
+              log("文字稿共 " + v.segs.length + " 段" + (v.asr ? "（语音识别）" : ""), "o");
+              const srt = toSrt(v.segs);
+              const time = Date.now();
+              let md, frames = [], sys = "";
+              CAP = [];
+              if (subOnly) md = "# " + v.title + "【字幕】\n\n" + toLines(v.segs).join("\n\n");
+              else {
+                if (V3.shot) {
+                  try {
+                    frames = await getFrames(v);
+                    if (frames.length) frames = await readFrames(frames);
+                    log("有效截图 " + frames.length + " 张", "o");
+                  } catch (e) { log("截图/识图没成功，先生成纯文字笔记：" + e.message, "e"); frames = []; }
+                }
+                FRAME_MODE = frames.length > 0;
+                sys = sysPrompt();
+                const segsAll = FRAME_MODE
+                  ? v.segs.concat(frames.map(f => ({ from: f.t, to: f.t, text: "【图" + f.n + "】（" + f.type + "）" + f.content.replace(/\s*\n\s*/g, " / ") }))).sort((a, b) => a.from - b.from)
+                  : v.segs;
+                try { md = await makeNotes(v.title, segsAll); } finally { FRAME_MODE = false; }
+                md = cleanMd(md);
+                if (frames.length) md = insertImages(md, frames);
+                if (!/^#\s/.test(md.trim())) md = "# " + v.title + "\n\n" + md;
+                md += "\n\n---\n来源：https://www.bilibili.com/video/" + v.bvid + "?p=" + v.p + "\n";
+              }
+              const item = { title: v.title, bvid: v.bvid, p: v.p, md, srt, kind: subOnly ? "sub" : "note", time, imgs: frames.map(f => f.name) };
+              if (!subOnly) {
+                item.mat = matName(item);
+                saveMat(item.mat, {
+                  title: v.title, bvid: v.bvid, p: v.p, asr: !!v.asr, style: $("style").value, req: $("req").value.trim(), ts: $("tsOn").checked,
+                  sys, segs: v.segs.map(s => ({ from: s.from, to: s.to, text: s.text })),
+                  frames: frames.map(f => ({ n: f.n, t: f.t, type: f.type, content: f.content, name: f.name })),
+                  calls: CAP, vers: [{ md, note: "首次生成", time }], cur: 0
+                });
+              }
+              saveHist(item); show(item);
+              log("完成！", "o");
+            } catch (e) {
+              log("出错了：" + e.message, "e");
+            } finally {
+              CAP = null;
+              $("goBtn").disabled = $("subOnly").disabled = false;
+            }
+          }
+          run = async function (s) { $("busy").style.display = "block"; try { await runV4(s); } finally { $("busy").style.display = "none"; } };
+          $("goBtn").onclick = () => run(false);
+          $("subOnly").onclick = () => run(true);
+
+          // ---- 5. 结果卡片工具条：版本、AI 输入、修改 ----
+          (function () {
+            const bar = document.createElement("div");
+            bar.id = "v4bar";
+            bar.innerHTML =
+              '<div class="v4bar"><select id="v4ver"></select><button id="v4in" class="ghost">AI 输入</button></div>' +
+              '<details id="v4rev"><summary>不满意？写修改意见让 AI 重写</summary>' +
+              '<textarea id="v4txt" rows="3" placeholder="例如：第二题的受力分析写得更详细；公式全部单独成行；删掉和题目无关的闲聊"></textarea>' +
+              '<button id="v4go">按意见重写（不重新截图、不重新取字幕）</button><p class="mute" id="v4msg"></p></details>' +
+              '<p class="mute" id="v4old" style="display:none">这篇是旧版本生成的，没有保存材料，不能查看 AI 输入或修改。</p>';
+            $("resTitle").after(bar);
+            const pg = document.createElement("div"); pg.id = "v4page"; document.body.appendChild(pg);
+          })();
+          let MAT = null;
+          function drawBar(item) {
+            MAT = loadMat(item);
+            const has = !!MAT;
+            $("v4ver").parentNode.style.display = has ? "flex" : "none";
+            $("v4rev").style.display = has ? "block" : "none";
+            $("v4old").style.display = (!has && item.kind !== "sub") ? "block" : "none";
+            if (!has) return;
+            $("v4ver").innerHTML = MAT.vers.map((x, i) => '<option value="' + i + '">第 ' + (i + 1) + ' 版：' + esc(x.note.slice(0, 20)) + '</option>').join("");
+            $("v4ver").value = String(MAT.cur || 0);
+          }
+          const _show4 = show;
+          show = function (item) { _show4(item); drawBar(item); };
+          $("v4ver").onchange = () => {
+            if (!MAT || !current) return;
+            MAT.cur = parseInt($("v4ver").value);
+            current.md = MAT.vers[MAT.cur].md;
+            $("source").value = current.md; $("preview").innerHTML = render(current.md);
+            saveMat(current.mat, MAT); updHist(current);
+          };
+          $("v4in").onclick = () => {
+            if (!MAT) return;
+            const dir = HAS_NATIVE ? Native.filesDir() : "";
+            const pre = s => "<pre>" + esc(String(s || "（无）")) + "</pre>";
+            let h = '<div class="v4top"><b>本次提供给 AI 的材料</b><button id="v4close">返回</button></div>';
+            h += "<h3>基本信息</h3>" + pre("标题：" + MAT.title + "\n来源：" + MAT.bvid + " P" + MAT.p + "\n文字稿：" + (MAT.asr ? "语音识别" : "B站字幕") + "，" + MAT.segs.length + " 段\n截图：" + MAT.frames.length + " 张\n笔记风格：" + MAT.style + "\n时间戳：" + (MAT.ts ? "开" : "关"));
+            h += "<h3>我的要求</h3>" + pre(MAT.req);
+            h += "<h3>System Prompt（给 AI 的规则）</h3>" + pre(MAT.sys);
+            h += "<h3>截图和识图结果（" + MAT.frames.length + " 张）</h3>";
+            MAT.frames.forEach(f => {
+              const t = Math.floor(f.t / 60) + ":" + String(Math.floor(f.t % 60)).padStart(2, "0");
+              h += "<p><b>图" + f.n + "</b> · " + esc(f.type) + " · " + t + '</p><img loading="lazy" src="file://' + dir + "/img/" + f.name + '">' + pre(f.content);
+            });
+            h += "<details><summary><b>文字稿全文（含截图插入位置）</b></summary>" + pre(framesText(MAT.segs, MAT.frames)) + "</details>";
+            h += "<details><summary><b>实际发送的请求记录（" + (MAT.calls || []).length + " 次）</b></summary>";
+            (MAT.calls || []).forEach((c, i) => { h += "<p><b>第 " + (i + 1) + " 次</b></p>" + c.map(m => "<p class='mute'>" + m.role + "</p>" + pre(m.content.length > 20000 ? m.content.slice(0, 20000) + "\n…（太长，已截断显示）" : m.content)).join(""); });
+            h += "</details>";
+            const pg = $("v4page"); pg.innerHTML = h; pg.style.display = "block"; pg.scrollTop = 0;
+            $("v4close").onclick = () => { pg.style.display = "none"; };
+          };
+          $("v4go").onclick = async () => {
+            if (!MAT || !current) return;
+            const note = $("v4txt").value.trim();
+            if (!note) { alert("先写修改意见"); return; }
+            const btn = $("v4go"); btn.disabled = true; $("v4msg").textContent = "正在重写，大约半分钟到两分钟…";
+            CAP = [];
+            try {
+              const prev = $("source").value.replace(/!\[图(\d+)\]\(img\/[^)\s]+\)/g, "【图$1】").replace(/\n---\n来源：[^\n]*\n?$/, "");
+              let mat = framesText(MAT.segs, MAT.frames);
+              if (mat.length > 60000) mat = mat.slice(0, 60000) + "\n…（后面省略）";
+              const sys = (MAT.sys || sysPrompt()) + "\n\n【修改模式】用户对上一版笔记不满意，会给出修改意见。请根据原始材料和上一版笔记，按意见输出修改后的完整笔记（Markdown，从一级标题开始），不要解释改了什么。保留上一版中合理的部分和【图N】标记。公式用 $...$ 或 $$...$$，多行公式写在同一个 $$ 块里。";
+              const user = "视频标题：" + MAT.title + "\n\n【原始材料：字幕和截图识别】\n" + mat + "\n\n【上一版笔记】\n" + prev + "\n\n【修改意见】\n" + note;
+              let md = await chat([{ role: "system", content: sys }, { role: "user", content: user }]);
+              md = cleanMd(md);
+              if (!MAT.ts) md = stripTs(md);
+              if (MAT.frames.length) md = insertImages(md, MAT.frames);
+              if (!/^#\s/.test(md.trim())) md = "# " + MAT.title + "\n\n" + md;
+              md += "\n\n---\n来源：https://www.bilibili.com/video/" + MAT.bvid + "?p=" + MAT.p + "\n";
+              MAT.vers.push({ md, note, time: Date.now() }); MAT.cur = MAT.vers.length - 1;
+              MAT.calls = (MAT.calls || []).concat(CAP);
+              current.md = md; saveMat(current.mat, MAT); updHist(current);
+              show(current); $("v4txt").value = "";
+              $("v4msg").textContent = "已生成第 " + MAT.vers.length + " 版，可在上方下拉框切换各版本。";
+            } catch (e) { $("v4msg").textContent = "重写失败：" + e.message; }
+            finally { CAP = null; btn.disabled = false; }
+          };
           </script>
           </body>
           </html>
           VTN_EOF
+
+      - name: Fetch KaTeX
+        run: |
+          curl -fsSL https://registry.npmjs.org/katex/-/katex-0.16.11.tgz -o katex.tgz
+          tar xzf katex.tgz
+          mkdir -p app/src/main/assets/katex
+          cp package/dist/katex.min.js package/dist/katex.min.css app/src/main/assets/katex/
+          cp -r package/dist/fonts app/src/main/assets/katex/
+          rm -rf package katex.tgz
+          ls app/src/main/assets/katex
 
       - name: Build APK
         run: gradle assembleDebug --no-daemon

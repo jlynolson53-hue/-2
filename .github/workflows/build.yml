@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 2
-                  versionName "1.1"
+                  versionCode 3
+                  versionName "1.2"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -701,14 +701,14 @@ jobs:
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <title>视频笔记</title>
           <style>
-          :root{--bg:#f3f5f9;--card:#fff;--fg:#1f2328;--mute:#6b7280;--pri:#2563eb;--pri2:#dbeafe;--bd:#e5e7eb;--err:#dc2626;--ok:#16a34a;--sh:0 1px 3px rgba(0,0,0,.06)}
-          @media (prefers-color-scheme: dark){:root{--bg:#0f1115;--card:#1a1d24;--fg:#e6e6e6;--mute:#9aa0a6;--bd:#2c313a;--pri:#60a5fa;--pri2:#1e3a5f;--sh:none}}
+          :root{--bg:#f3f5f9;--card:#fff;--fg:#1f2328;--mute:#6b7280;--pri:#2563eb;--pri2:#dbeafe;--bd:#e5e7eb;--err:#dc2626;--ok:#16a34a;--sh:0 1px 3px rgba(0,0,0,.06);color-scheme:light}
+          :root[data-theme=dark]{--bg:#0f1115;--card:#1a1d24;--fg:#e6e6e6;--mute:#9aa0a6;--bd:#2c313a;--pri:#60a5fa;--pri2:#1e3a5f;--ok:#4ade80;--err:#f87171;--sh:none;color-scheme:dark}
           *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-          body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px;padding-bottom:76px}
+          body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px;padding-bottom:76px;transition:background .2s,color .2s}
           .top{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;padding:12px 20px}
           .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(#2563eb,#1d4ed8);display:grid;place-items:center;color:#fff;font-size:16px}
-          .top b{font-size:19px}.top .chip{margin-left:auto;cursor:pointer}
-          .chip{font-size:13px;padding:4px 10px;border-radius:99px;background:var(--bg);color:var(--mute);border:1px solid var(--bd)}
+          .top b{font-size:19px}.top .chip{cursor:pointer}.top .sp{flex:1}
+          .chip{font-size:13px;padding:5px 12px;border-radius:99px;background:var(--bg);color:var(--mute);border:1px solid var(--bd)}
           .chip.ok{color:var(--ok);border-color:var(--ok)}
           .wrap{max-width:1280px;margin:0 auto;padding:16px 20px}
           .card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:var(--sh)}
@@ -718,18 +718,30 @@ jobs:
           input:focus,textarea:focus,select:focus{border-color:var(--pri)}
           textarea{min-height:80px;resize:vertical}
           button{padding:11px 18px;border:0;border-radius:10px;background:var(--pri);color:#fff;font-size:16px;margin:8px 8px 0 0;cursor:pointer}
+          :root[data-theme=dark] button:not(.sec):not(.ghost){color:#0f1115}
           button.sec{background:transparent;color:var(--pri);border:1px solid var(--pri)}
           button.ghost{background:var(--pri2);color:var(--pri)}
           button.big{padding:14px 28px;font-size:17px;font-weight:600}
           button:disabled{opacity:.5}
           .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
           .mute{color:var(--mute);font-size:14px}
+          .sw{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:12px;border:1px solid var(--bd);border-radius:12px;color:var(--fg);font-size:15px;cursor:pointer}
+          .sw small{display:block;color:var(--mute);font-size:13px;margin-top:2px}
+          .sw input{display:none}
+          .sw i{flex:none;width:48px;height:28px;border-radius:99px;background:var(--bd);position:relative;transition:.2s}
+          .sw i::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+          .sw input:checked+i{background:var(--pri)}
+          .sw input:checked+i::after{left:23px}
+          .seg{display:flex;border:1px solid var(--bd);border-radius:12px;overflow:hidden;margin-top:6px}
+          .seg button{flex:1;margin:0;border-radius:0;background:transparent;color:var(--fg);padding:12px 0}
+          .seg button.on{background:var(--pri);color:#fff}
+          :root[data-theme=dark] .seg button.on{color:#0f1115}
           .req{margin-top:14px;border:1px dashed var(--pri);border-radius:12px;padding:10px 12px;background:var(--pri2)}
           .req summary{cursor:pointer;font-weight:600;color:var(--pri)}
           .req summary em{font-style:normal;font-weight:400;font-size:13px;margin-left:6px;color:var(--ok)}
           .req textarea{min-height:110px;margin-top:8px;background:var(--card)}
           .pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-          .pills button{margin:0;padding:6px 12px;font-size:14px;border-radius:99px;background:var(--card);color:var(--fg);border:1px solid var(--bd)}
+          .pills button{margin:0;padding:6px 12px;font-size:14px;border-radius:99px;background:var(--card)!important;color:var(--fg)!important;border:1px solid var(--bd)}
           #log{white-space:pre-wrap;font-size:14px;color:var(--mute);max-height:180px;overflow:auto;margin-top:12px;background:var(--bg);border-radius:10px}
           #log:not(:empty){padding:10px 12px}
           #log .e{color:var(--err)}#log .o{color:var(--ok)}
@@ -740,13 +752,13 @@ jobs:
           .bar details{position:relative;display:inline-block}
           .bar details summary{list-style:none;padding:11px 18px;margin:8px 8px 0 0;border-radius:10px;border:1px solid var(--bd);color:var(--mute);cursor:pointer}
           .bar details summary::-webkit-details-marker{display:none}
-          .menu{position:absolute;z-index:4;top:56px;left:0;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:6px 10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.15);width:200px}
+          .menu{position:absolute;z-index:4;top:56px;left:0;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:6px 10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.25);width:200px}
           .menu button{width:100%;margin:6px 0 0}
           #preview{line-height:1.85;font-size:17px;overflow-wrap:anywhere;max-width:860px;margin:16px auto 0}
           #preview h1{font-size:24px}#preview h2{font-size:20px;border-left:4px solid var(--pri);padding-left:10px;margin-top:28px}#preview h3{font-size:18px;color:var(--pri)}
           #preview code{background:var(--bg);padding:1px 5px;border-radius:5px}
-          #preview blockquote{margin:10px 0;padding:6px 14px;border-left:4px solid var(--bd);color:var(--mute);background:var(--bg);border-radius:0 8px 8px 0}
           #preview a.ts{color:var(--pri);text-decoration:none;font-family:monospace;background:var(--pri2);padding:0 6px;border-radius:6px;font-size:14px}
+          #preview hr{border:0;border-top:1px solid var(--bd)}
           #source{min-height:420px;font-family:monospace;font-size:14px;margin-top:12px}
           .hist{padding:14px 4px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;gap:10px;align-items:center;cursor:pointer}
           .hist:last-child{border-bottom:0}
@@ -756,14 +768,18 @@ jobs:
           .empty{text-align:center;padding:40px 0;color:var(--mute)}
           .page{display:none}.page.on{display:block}
           .nav{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--card);border-top:1px solid var(--bd);display:flex;justify-content:center}
-          .nav button{flex:0 1 180px;background:transparent;color:var(--mute);margin:0;border-radius:0;padding:8px 0 10px;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:2px}
+          .nav button{flex:0 1 180px;background:transparent!important;color:var(--mute)!important;margin:0;border-radius:0;padding:8px 0 10px;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:2px}
           .nav button span{font-size:22px;line-height:1}
-          .nav button.on{color:var(--pri);font-weight:600}
+          .nav button.on{color:var(--pri)!important;font-weight:600}
           @media (min-width:1100px){#pg-gen.on{display:grid;grid-template-columns:420px 1fr;gap:16px;align-items:start}#pg-gen .side{position:sticky;top:76px}}
           </style>
+          <script>
+          (function(){var m=localStorage.getItem("vtn_theme")||"auto";var d=m==="dark"||(m==="auto"&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";})();
+          </script>
           </head>
           <body>
-          <div class="top"><div class="logo">&#9654;</div><b>视频笔记</b><span class="chip" id="loginChip">B站：检测中</span></div>
+          <div class="top"><div class="logo">&#9654;</div><b>视频笔记</b><span class="sp"></span>
+          <span class="chip" id="themeChip">&#9728; 白天</span><span class="chip" id="loginChip">B站：检测中</span></div>
           <div class="wrap">
 
           <div class="page on" id="pg-gen">
@@ -781,6 +797,7 @@ jobs:
                     <option value="detail">详细逐段</option>
                   </select></div>
               </div>
+              <label class="sw"><span>笔记中显示时间戳<small id="tsTip">关闭：笔记更干净，适合打印和复习</small></span><input type="checkbox" id="tsOn"><i></i></label>
               <details class="req" id="reqBox">
                 <summary>我的要求<em id="reqOn"></em></summary>
                 <textarea id="req" placeholder="写下你对这篇笔记的要求，例如：&#10;这是高三物理复习课，重点整理解题方法；&#10;每个知识点后面列出易错点；&#10;最后出3道自测题。"></textarea>
@@ -822,6 +839,13 @@ jobs:
           </div>
 
           <div class="page" id="pg-set">
+            <div class="card">
+              <h2>外观</h2>
+              <div class="seg" id="themeSeg">
+                <button data-m="light">&#9728; 白天</button><button data-m="dark">&#9790; 黑夜</button><button data-m="auto">跟随系统</button>
+              </div>
+              <p class="mute">也可以直接点右上角的按钮在白天和黑夜之间切换。</p>
+            </div>
             <div class="card">
               <h2>B站登录</h2>
               <div id="loginState" class="mute">检测中…</div>
@@ -1121,7 +1145,7 @@ jobs:
 
           if (HAS_NATIVE) { const t = Native.takeShared(); if (t) $("input").value = t; }
 
-          // ---- 界面增强 ----
+          // ---- 页面切换 ----
           function tab(p) {
             document.querySelectorAll(".page").forEach(x => x.classList.toggle("on", x.id === "pg-" + p));
             document.querySelectorAll(".nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
@@ -1129,9 +1153,34 @@ jobs:
             if (p === "set") refreshLogin();
           }
           document.querySelectorAll(".nav button").forEach(b => b.onclick = () => tab(b.dataset.p));
+          // ---- 白天 / 黑夜 ----
+          const darkMQ = window.matchMedia ? matchMedia("(prefers-color-scheme: dark)") : null;
+          function applyTheme() {
+            const m = localStorage.getItem("vtn_theme") || "auto";
+            const dark = m === "dark" || (m === "auto" && darkMQ && darkMQ.matches);
+            document.documentElement.dataset.theme = dark ? "dark" : "light";
+            $("themeChip").innerHTML = dark ? "&#9790; 黑夜" : "&#9728; 白天";
+            document.querySelectorAll("#themeSeg button").forEach(b => b.classList.toggle("on", b.dataset.m === m));
+          }
+          function setTheme(m) { localStorage.setItem("vtn_theme", m); applyTheme(); }
+          $("themeChip").onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+          document.querySelectorAll("#themeSeg button").forEach(b => b.onclick = () => setTheme(b.dataset.m));
+          if (darkMQ && darkMQ.addEventListener) darkMQ.addEventListener("change", applyTheme);
+          applyTheme();
+          // ---- 时间戳开关 ----
+          $("tsOn").checked = localStorage.getItem("vtn_ts") === "1";
+          function tsTip() { $("tsTip").textContent = $("tsOn").checked ? "开启：标题后带 [分:秒]，点一下跳到视频对应位置" : "关闭：笔记更干净，适合打印和复习"; }
+          $("tsOn").onchange = () => { localStorage.setItem("vtn_ts", $("tsOn").checked ? "1" : "0"); tsTip(); };
+          tsTip();
+          const stripTs = md => md.replace(/[ \t]*[\[（(]\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:[-~–—]\s*\d{1,2}:\d{2}(?::\d{2})?\s*)?[\]）)]/g, "");
+          const _mn = makeNotes;
+          makeNotes = async function (title, segs) {
+            const md = await _mn(title, segs);
+            return $("tsOn").checked ? md : stripTs(md);
+          };
           // ---- 我的要求 ----
           $("req").value = localStorage.getItem("vtn_req") || "";
-          function reqMark() { const on = $("req").value.trim().length > 0; $("reqOn").textContent = on ? "已启用" : ""; }
+          function reqMark() { $("reqOn").textContent = $("req").value.trim() ? "已启用" : ""; }
           function reqSave() { localStorage.setItem("vtn_req", $("req").value); reqMark(); }
           $("req").addEventListener("input", reqSave);
           if ($("req").value.trim()) $("reqBox").open = true;
@@ -1145,10 +1194,13 @@ jobs:
           $("reqClear").onclick = () => { if (confirm("清空所有要求？")) { $("req").value = ""; reqSave(); } };
           const _sp = sysPrompt;
           sysPrompt = function () {
+            const ts = $("tsOn").checked;
+            let p = _sp();
+            if (!ts) p = p.replace(/1）[^；]*时间[^；]*；/, "1）不要在笔记里标注任何时间戳或 [mm:ss] 形式的时间；") + "\n特别注意：字幕里的 [分:秒] 只是给你定位用的，笔记正文中一律不要出现时间。";
             const r = $("req").value.trim();
-            if (!r) return _sp();
-            return _sp() + "\n\n【用户的额外要求，请尽量满足】\n" + r +
-              "\n（注意：额外要求不能违背“只根据字幕内容整理、不编造”和“标注时间戳”这两条规则；如果要求出自测题或补充例题，请明确标注“【补充】”，与视频原内容区分开。）";
+            if (!r) return p;
+            return p + "\n\n【用户的额外要求，请尽量满足】\n" + r +
+              "\n（注意：额外要求不能违背“只根据字幕内容整理、不编造”" + (ts ? "和“标注时间戳”" : "") + "的规则；如果要求出自测题或补充例题，请明确标注“【补充】”，与视频原内容区分开。）";
           };
           // ---- 其它 ----
           const _show = show;

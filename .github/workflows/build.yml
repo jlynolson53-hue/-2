@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 11
-                  versionName "1.5.4"
+                  versionCode 12
+                  versionName "1.5.5"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -610,6 +610,41 @@ jobs:
                   return new String(bo.toByteArray(), StandardCharsets.UTF_8);
               }
 
+
+              // ===== v1.5.5：400 自动重试 + 任务断点文件 =====
+              private JSONObject retry400(JSONObject r, String method, String url, String headersJson, String body) {
+                  if (!url.contains("/chat/completions") || body == null || body.isEmpty()) return r;
+                  StringBuilder note = new StringBuilder();
+                  boolean dt = false, dm = false, dh = false;
+                  try {
+                      String b = body;
+                      for (int k = 0; k < 3 && r.optInt("status") == 400; k++) {
+                          String err = r.optString("body").toLowerCase();
+                          JSONObject j = new JSONObject(b);
+                          String fix;
+                          if (!dt && err.contains("temperature") && j.has("temperature")) {
+                              j.remove("temperature"); dt = true; fix = "去掉 temperature";
+                          } else if (!dm && err.contains("max_tokens") && j.has("max_tokens")
+                                  && (err.contains("not support") || err.contains("unsupported") || err.contains("max_completion_tokens"))) {
+                              j.put("max_completion_tokens", j.get("max_tokens")); j.remove("max_tokens"); dm = true; fix = "改用 max_completion_tokens";
+                          } else if (!dh && (err.contains("max_tokens") || err.contains("max_completion_tokens"))) {
+                              String key = j.has("max_tokens") ? "max_tokens" : (j.has("max_completion_tokens") ? "max_completion_tokens" : null);
+                              if (key == null) break;
+                              j.put(key, Math.max(256, j.optInt(key, 4096) / 2)); dh = true; fix = "输出上限减半";
+                          } else break;
+                          b = j.toString();
+                          if (note.length() > 0) note.append("、");
+                          note.append(fix);
+                          r = doHttp(method, url, headersJson, b);
+                      }
+                      if (note.length() > 0) r.put("note", note.toString());
+                  } catch (Exception ignored) { }
+                  return r;
+              }
+
+              private static String safe(String n) { return n.replaceAll("[^A-Za-z0-9_.\\-]", "_"); }
+              private File taskDir(String id) { File d = new File(new File(getFilesDir(), "task"), safe(id)); d.mkdirs(); return d; }
+
               private JSONObject doHttp(String method, String url, String headersJson, String body) {
                   JSONObject r = new JSONObject();
                   try {
@@ -700,6 +735,7 @@ jobs:
                                       final String headersJson, final String body) {
                       new Thread(() -> {
                           JSONObject r = doHttp(method, url, headersJson, body);
+                          r = retry400(r, method, url, headersJson, body);
                           final String js = "window.__nativeCb(" + JSONObject.quote(id) + "," + JSONObject.quote(r.toString()) + ")";
                           runOnUiThread(() -> web.evaluateJavascript(js, null));
                       }).start();
@@ -757,6 +793,46 @@ jobs:
                           try { stopService(new Intent(MainActivity.this, KeepService.class)); } catch (Exception ignored) { }
                       });
                   }
+
+                  @JavascriptInterface
+                  public String taskWrite(String id, String name, String text) {
+                      try {
+                          FileOutputStream o = new FileOutputStream(new File(taskDir(id), safe(name)));
+                          o.write(text.getBytes(StandardCharsets.UTF_8)); o.close();
+                          return "ok";
+                      } catch (Exception e) { return "err:" + e.getMessage(); }
+                  }
+
+                  @JavascriptInterface
+                  public String taskRead(String id, String name) {
+                      try {
+                          File f = new File(new File(new File(getFilesDir(), "task"), safe(id)), safe(name));
+                          if (!f.exists()) return "";
+                          return new String(readFile(f), StandardCharsets.UTF_8);
+                      } catch (Exception e) { return ""; }
+                  }
+
+                  @JavascriptInterface
+                  public String taskList() {
+                      org.json.JSONArray a = new org.json.JSONArray();
+                      File[] fs = new File(getFilesDir(), "task").listFiles();
+                      if (fs != null) for (File f : fs) if (f.isDirectory()) a.put(f.getName());
+                      return a.toString();
+                  }
+
+                  @JavascriptInterface
+                  public void taskDel(String id) {
+                      File d = new File(new File(getFilesDir(), "task"), safe(id));
+                      File[] fs = d.listFiles();
+                      if (fs != null) for (File f : fs) f.delete();
+                      d.delete();
+                  }
+
+                  @JavascriptInterface
+                  public boolean imgExists(String name) {
+                      return new File(new File(getFilesDir(), "img"), name).exists();
+                  }
+
 
                   @JavascriptInterface
                   public String takeShared() {
@@ -1326,7 +1402,7 @@ jobs:
               <label>主题色</label><div class="chips" id="seedChips"></div>
             </div>
             <div class="gt">关于</div>
-            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.4</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
+            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.5</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
           </div></div>
 
           <div id="pg-det">
@@ -1490,7 +1566,7 @@ jobs:
             return out.map(c => "[" + fmt(c.from) + "] " + c.text);
           }
 
-          async function chat(messages) {
+          async function chat(messages, opts) {
             if (!S.key) throw new Error("还没有填写 API Key，请先展开“大模型设置”");
             const base = S.base.replace(/\/+$/, "");
             const r = await http("POST", base + "/chat/completions",
@@ -1502,7 +1578,10 @@ jobs:
               const tip = { 401: "API Key 不对或已失效", 402: "账户余额不足，需要充值", 429: "请求太频繁或额度用完，稍后再试" }[r.status] || "大模型请求失败";
               throw new Error(tip + "（状态码 " + r.status + "）：" + m);
             }
-            return j.choices[0].message.content;
+            if (r.note) log("接口返回 400，已自动调整后重试：" + r.note);
+            const ch = j.choices[0];
+            if (opts && opts.trunc && ch.finish_reason === "length") throw Object.assign(new Error("输出被截断"), { trunc: true });
+            return ch.message.content;
           }
           const STYLE = {
             study: "写成学习笔记：按内容分成若干小节，每节有小标题、要点列表，重要概念加粗，有例子或公式要保留，最后给“知识点总结”。",
@@ -1521,6 +1600,39 @@ jobs:
             }));
             return out;
           }
+          const SUM_LIM = 12000;
+          const SUM_P = "下面是一个视频的分段笔记，请用简体中文写一个“## 全片概要”小节（3-6句话加最多8条要点），只输出这个小节：\n\n";
+          async function sumPiece(t) {
+            if (t.length <= SUM_LIM)
+              return await chat([{ role: "user", content: "下面是一个视频中连续几段的笔记，请用简体中文压缩成要点概括（不超过600字），只输出概括：\n\n" + t }], { trunc: true });
+            let m = t.lastIndexOf("\n", Math.floor(t.length / 2)); if (m < 1) m = Math.floor(t.length / 2);
+            return (await sumPiece(t.slice(0, m))) + "\n\n" + (await sumPiece(t.slice(m)));
+          }
+          async function summarize(title, parts, joined) {
+            try {
+              let src = joined;
+              if (joined.length > SUM_LIM) {
+                log("内容较长，分组汇总（两段一组）…");
+                let g = parts;
+                do {
+                  const pairs = []; for (let i = 0; i < g.length; i += 2) pairs.push(g.slice(i, i + 2).join("\n\n"));
+                  g = await pool(3, pairs, sumPiece);
+                } while (g.join("\n\n").length > SUM_LIM && g.length > 1);
+                src = g.join("\n\n");
+              }
+              log("正在生成全片概要…");
+              const sum = await chat([{ role: "user", content: SUM_P + src.slice(0, 60000) }], { trunc: true });
+              return "# " + title + "\n\n" + sum + "\n\n" + joined;
+            } catch (e) {
+              if (!e.trunc) throw e;
+              log("汇总输出被截断，已走兜底：直接按顺序拼接分段笔记");
+              return "# " + title + "\n\n> 本篇未完成整体汇总，以下为分段笔记\n\n" + joined;
+            }
+          }
+          let TASK = null;
+          function tWriteRaw(n, t) { if (TASK && HAS_NATIVE) Native.taskWrite(TASK.id, n, t); }
+          function tWrite(n, o) { tWriteRaw(n, JSON.stringify(o)); }
+          function tRead(n) { if (!TASK || !HAS_NATIVE) return null; try { return JSON.parse(Native.taskRead(TASK.id, n) || "null"); } catch (e) { return null; } }
           async function makeNotes(title, segs) {
             const lines = toLines(segs);
             const chunks = []; let buf = "";
@@ -1537,10 +1649,8 @@ jobs:
               log("第 " + (i + 1) + "/" + chunks.length + " 段完成");
               return r;
             });
-            log("正在生成全片概要…");
-            const joined = parts.join("\n\n");
-            const sum = await chat([{ role: "user", content: "下面是一个视频的分段笔记，请用简体中文写一个“## 全片概要”小节（3-6句话加最多8条要点），只输出这个小节：\n\n" + joined.slice(0, 60000) }]);
-            return "# " + title + "\n\n" + sum + "\n\n" + joined;
+            parts.forEach((p, i) => tWriteRaw("part_" + String(i + 1).padStart(2, "0") + ".md", p));
+            return await summarize(title, parts, parts.join("\n\n"));
           }
 
           let current = null;
@@ -2112,7 +2222,115 @@ jobs:
               $("goBtn").disabled = $("subOnly").disabled = false;
             }
           }
-          run = async function (s) { $("busy").style.display = "block"; try { await runV4(s); } finally { $("busy").style.display = "none"; } };
+          // ===== v1.5.5：断点续跑 =====
+          let PENDING_ST = null;
+          const _chatC = chat;
+          chat = async function (messages, opts) {
+            if (!TASK || !HAS_NATIVE) return await _chatC(messages, opts);
+            const key = "c_" + Native.md5(JSON.stringify(messages)) + ".txt";
+            const hit = Native.taskRead(TASK.id, key);
+            if (hit) return hit;
+            const r = await _chatC(messages, opts);
+            Native.taskWrite(TASK.id, key, r);
+            return r;
+          };
+          function saveSt(st, step) { st.step = step; tWrite("state.json", st); }
+          function applySt(st) {
+            $("input").value = st.input || ""; $("pnum").value = st.p || ""; $("style").value = st.style || "study";
+            $("tsOn").checked = !!st.ts; $("req").value = st.req || ""; REQ_ON = st.reqOn !== false; $("reqEn").checked = REQ_ON; reqMark();
+            V3.shot = !!st.shot;
+          }
+          async function runTask(subOnly) {
+            $("log").innerHTML = "";
+            $("goBtn").disabled = $("subOnly").disabled = true;
+            if ($("resumeBox")) $("resumeBox").style.display = "none";
+            let st = PENDING_ST; PENDING_ST = null;
+            try {
+              if (st) { applySt(st); subOnly = !!st.sub; TASK = st; log("继续上次没完成的任务：" + (st.title || st.input), "o"); }
+              else {
+                st = { id: String(Date.now()), input: $("input").value.trim(), p: $("pnum").value, style: $("style").value, ts: $("tsOn").checked,
+                  req: $("req").value, reqOn: REQ_ON, shot: !!V3.shot, sub: !!subOnly, step: "取字幕", start: Date.now(), title: "" };
+                TASK = st;
+              }
+              saveSt(st, "取字幕");
+              let v = tRead("subs.json");
+              if (v) log("已跳过取字幕（用上次保存的结果）", "o");
+              else { const info = await parseInput(st.input); v = await fetchSubs2(info); tWrite("subs.json", v); }
+              st.title = v.title;
+              log("文字稿共 " + v.segs.length + " 段" + (v.asr ? "（语音识别）" : ""), "o");
+              const srt = toSrt(v.segs);
+              const time = Date.now();
+              let md, frames = [], sys = "";
+              CAP = [];
+              if (subOnly) md = "# " + v.title + "【字幕】\n\n" + toLines(v.segs).join("\n\n");
+              else {
+                if (V3.shot) {
+                  try {
+                    saveSt(st, "截图");
+                    let fr = tRead("frames.json");
+                    if (fr && fr.every(f => Native.imgExists(f.name))) log("已跳过截图（用上次保存的结果）", "o");
+                    else { fr = await getFrames(v); tWrite("frames.json", fr); }
+                    saveSt(st, "识图");
+                    const rd = tRead("frames_read.json");
+                    if (rd) { frames = rd; log("已跳过识图（用上次保存的结果）", "o"); }
+                    else { frames = fr.length ? await readFrames(fr) : []; tWrite("frames_read.json", frames); }
+                    log("有效截图 " + frames.length + " 张", "o");
+                  } catch (e) { if (/余额|API Key|状态码 40[12]/.test(e.message)) throw e; log("截图/识图没成功，先生成纯文字笔记：" + e.message, "e"); frames = []; }
+                }
+                saveSt(st, "写笔记");
+                FRAME_MODE = frames.length > 0;
+                sys = sysPrompt();
+                const segsAll = FRAME_MODE
+                  ? v.segs.concat(frames.map(f => ({ from: f.t, to: f.t, text: "【图" + f.n + "】（" + f.type + "）" + f.content.replace(/\s*\n\s*/g, " / ") }))).sort((a, b) => a.from - b.from)
+                  : v.segs;
+                try { md = await makeNotes(v.title, segsAll); } finally { FRAME_MODE = false; }
+                md = cleanMd(md);
+                if (frames.length) md = insertImages(md, frames);
+                if (!/^#\s/.test(md.trim())) md = "# " + v.title + "\n\n" + md;
+                md += "\n\n---\n来源：https://www.bilibili.com/video/" + v.bvid + "?p=" + v.p + "\n";
+              }
+              const item = { title: v.title, bvid: v.bvid, p: v.p, md, srt, kind: subOnly ? "sub" : "note", time, imgs: frames.map(f => f.name) };
+              if (!subOnly) {
+                item.mat = matName(item);
+                saveMat(item.mat, {
+                  title: v.title, bvid: v.bvid, p: v.p, asr: !!v.asr, style: st.style, req: st.reqOn !== false ? String(st.req || "").trim() : "", ts: !!st.ts,
+                  sys, segs: v.segs.map(s => ({ from: s.from, to: s.to, text: s.text })),
+                  frames: frames.map(f => ({ n: f.n, t: f.t, type: f.type, content: f.content, name: f.name })),
+                  calls: CAP, vers: [{ md, note: "首次生成", time }], cur: 0
+                });
+              }
+              saveHist(item); show(item);
+              if (HAS_NATIVE) Native.taskDel(st.id);
+              log("完成！", "o");
+            } catch (e) {
+              log("出错了：" + e.message, "e");
+              if (TASK) { tWrite("state.json", st); log("进度已保存，处理好问题后可以点“继续生成”接着做", "o"); }
+            } finally {
+              CAP = null; TASK = null;
+              $("goBtn").disabled = $("subOnly").disabled = false;
+              showResume();
+            }
+          }
+          function showResume() {
+            if (!HAS_NATIVE || window.__busy) return;
+            let ids = []; try { ids = JSON.parse(Native.taskList() || "[]"); } catch (e) {}
+            let st = null;
+            for (const id of ids) {
+              let x = null; try { x = JSON.parse(Native.taskRead(id, "state.json") || "null"); } catch (e) {}
+              if (!x) { Native.taskDel(id); continue; }
+              if (!st || Number(x.id) > Number(st.id)) st = x;
+            }
+            let box = $("resumeBox");
+            if (!st) { if (box) box.style.display = "none"; return; }
+            if (!box) { box = document.createElement("div"); box.id = "resumeBox"; box.className = "req"; $("genCard").insertBefore(box, $("genCard").firstChild); }
+            box.style.display = "block";
+            box.innerHTML = "<p style='margin:12px 0 4px'><b>上次的笔记没生成完</b></p><div class='mute'></div>" +
+              "<div style='margin:8px 0 12px'><button id='rsGo'>继续生成</button> <button class='sec' id='rsDrop'>放弃</button></div>";
+            box.querySelector(".mute").textContent = (st.title || st.input || "未命名视频") + " · 停在：" + (st.step || "开始");
+            $("rsGo").onclick = () => { PENDING_ST = st; run(!!st.sub); };
+            $("rsDrop").onclick = () => { if (confirm("放弃这个任务？已保存的进度会被删除。")) { Native.taskDel(st.id); showResume(); } };
+          }
+          run = async function (s) { $("busy").style.display = "block"; try { await runTask(s); } finally { $("busy").style.display = "none"; } };
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);
 
@@ -2478,6 +2696,7 @@ jobs:
           };
           $("goBtn").onclick = () => run(false);
           $("subOnly").onclick = () => run(true);
+          setTimeout(showResume, 300);
           // ---- 笔记详情页 ----
           function openDet() { const d = $("pg-det"); if (!d.classList.contains("show")) { d.classList.add("show"); d.scrollTop = 0; } }
           function closeDet() { closeSheet(); $("pg-det").classList.remove("show"); }

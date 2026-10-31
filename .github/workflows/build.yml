@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 14
-                  versionName "1.5.7"
+                  versionCode 15
+                  versionName "1.5.8"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -1403,7 +1403,7 @@ jobs:
               <label>主题色</label><div class="chips" id="seedChips"></div>
             </div>
             <div class="gt">关于</div>
-            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.7</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
+            <div class="grp"><div class="li"><span>版本</span><span class="mute">1.5.8</span></div><div class="mute">视频笔记 · Material 3 界面</div></div>
           </div></div>
 
           <div id="pg-det">
@@ -1986,13 +1986,19 @@ jobs:
           }
           const VPROMPT = "你会看到一节高中网课视频中按时间顺序截取的几张画面，多为 PPT（展示题目）或手写板书（展示解题过程）。请逐张识别，只输出一个 JSON 数组，不要任何其他文字，格式：[{\"n\":编号,\"type\":\"题目\"或\"板书\"或\"图表\"或\"无关\",\"content\":\"识别内容\"}]。规则：题目——完整抄录题干、选项和题图中的已知条件；板书——按书写顺序写出推导步骤；图表——描述图中的物理/化学/生物要素（受力、电路连接、实验装置、结构式、曲线走势等）；只有人像、片头片尾、空白或完全看不清的画面标为“无关”，content 留空。公式一律用 LaTeX，行内用 $...$。看不清的字写“[看不清]”，不要猜。";
           function parseJsonArr(txt) {
-            const m = String(txt).match(/\[[\s\S]*\]/);
+            const t = String(txt || "").replace(/```(?:json)?/gi, "");
+            const m = t.match(/\[[\s\S]*\]/);
             if (!m) return [];
-            const fix = m[0].replace(/\\(?![\\"\/])/g, "\\\\");
-            try {
-              const a = JSON.parse(fix);
-              return Array.isArray(a) ? a.map(o => Object.assign({}, o, { content: String(o.content || "").replace(/\\n(?![a-zA-Z])/g, "\n") })) : [];
-            } catch (e) { return []; }
+            const norm = a => Array.isArray(a) ? a.map(o => Object.assign({}, o, {
+              n: parseInt(String(o.n == null ? "" : o.n).replace(/\D/g, "")) || null,
+              content: String(o.content || "").replace(/\\n(?![a-zA-Z])/g, "\n")
+            })) : [];
+            try { return norm(JSON.parse(m[0])); } catch (e) {}
+            const fix = m[0].replace(/\\(["\\\/])|\\/g, (x, c) => c ? x : "\\\\");
+            try { return norm(JSON.parse(fix)); } catch (e) {}
+            const out = [], re = /\{[^{}]*\}/g; let g;
+            while ((g = re.exec(fix))) { try { out.push(JSON.parse(g[0])); } catch (e) {} }
+            return norm(out);
           }
           const VM_LIST = ["Qwen/Qwen3-VL-32B-Instruct", "Qwen/Qwen3-VL-30B-A3B-Instruct", "Qwen/Qwen3-VL-8B-Instruct"];
           let VM_OK = null, VFAIL = null;
@@ -2761,6 +2767,7 @@ jobs:
                 const d = (j && (j.data || j)) || {};
                 const b = d.totalBalance != null ? d.totalBalance : (d.balance != null ? d.balance : null);
                 if (b != null) out.push("硅基流动余额：" + b + " 元" + (d.chargeBalance != null ? "（其中充值 " + d.chargeBalance + " 元）" : ""));
+                else if (r.status === 410) out.push("硅基流动已停用余额查询接口（官方暂未提供新接口），请到硅基流动官网“费用中心”查看");
                 else out.push("硅基流动查不到余额（状态码 " + r.status + "）：" + String(r.body || r.error || "").slice(0, 150));
               } catch (e) { out.push("硅基流动查询失败：" + e.message); }
             }

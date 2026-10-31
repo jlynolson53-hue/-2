@@ -75,8 +75,8 @@ jobs:
                   applicationId "com.vtn.lite"
                   minSdk 24
                   targetSdk 34
-                  versionCode 15
-                  versionName "1.5.8"
+                  versionCode 16
+                  versionName "1.5.9"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -839,6 +839,24 @@ jobs:
                       String t = sharedText;
                       sharedText = "";
                       return t;
+                  }
+
+                  @JavascriptInterface
+                  public String paste() {
+                      final String[] out = {""};
+                      final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                      runOnUiThread(() -> {
+                          try {
+                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                              if (cb != null && cb.hasPrimaryClip() && cb.getPrimaryClip() != null && cb.getPrimaryClip().getItemCount() > 0) {
+                                  CharSequence s = cb.getPrimaryClip().getItemAt(0).coerceToText(MainActivity.this);
+                                  if (s != null) out[0] = s.toString();
+                              }
+                          } catch (Exception e) { }
+                          latch.countDown();
+                      });
+                      try { latch.await(2, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException e) { }
+                      return out[0];
                   }
 
                   @JavascriptInterface
@@ -2671,8 +2689,12 @@ jobs:
             $("chipShot").onclick = () => { const c = $("shotOn"); if (!c) return; c.checked = !c.checked; c.dispatchEvent(new Event("change")); sync(); };
             window.__syncChips = sync; sync();
             $("pasteBtn").onclick = async () => {
-              try { const t = await navigator.clipboard.readText(); if (t) { $("input").value = t; snack("已粘贴"); return; } } catch (e) {}
-              $("input").focus(); snack("长按输入框，选择“粘贴”");
+              let t = "";
+              if (HAS_NATIVE && Native.paste) { try { t = Native.paste() || ""; } catch (e) {} }
+              if (!t) { try { t = await navigator.clipboard.readText(); } catch (e) {} }
+              t = (t || "").trim();
+              if (t) { $("input").value = t; $("input").dispatchEvent(new Event("input")); snack("已粘贴"); }
+              else snack("剪贴板是空的，先去B站复制链接");
             };
           })();
           // ---- 设置页：把截图卡片搬进分组、Key 显示/隐藏 ----
